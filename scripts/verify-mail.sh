@@ -59,6 +59,7 @@ OUTBOUND_WAIT="${VERIFY_MAIL_OUTBOUND_WAIT:-240}"   # seconds to wait for the re
 # name, so the floor is set where "this expires before anyone could reasonably react".
 TLS_MIN_DAYS="${VERIFY_MAIL_TLS_MIN_DAYS:-7}"
 SMTP_VIA="${VERIFY_MAIL_SMTP_VIA:-bp-vps3-prod}"
+PROBE_FROM="${VERIFY_MAIL_PROBE_FROM:-}"   # envelope sender for the inbound probe
 SKIP="${VERIFY_MAIL_SKIP:-}"
 
 # ---------------------------------------------------------------------------------------
@@ -90,6 +91,10 @@ environment overrides (all optional):
   VERIFY_MAIL_TLS_MIN_DAYS    fail a certificate with fewer days left (default: 7)
   VERIFY_MAIL_OUTBOUND_PROBE  the authentication auto-responder to send the outbound probe
                               to (default: check-auth@verifier.port25.com)
+  VERIFY_MAIL_PROBE_FROM      envelope sender for the inbound probe. Defaults to
+                              verify-mail@<relay's own FQDN>. Never the domain under test:
+                              it publishes SPF, so a probe claiming to come from it would
+                              be sent from an unauthorised IP and correctly rejected.
 
 passwords:
   Each account needs its mailbox password, for the JMAP login and the outbound send.
@@ -492,33 +497,40 @@ jmap_session() {
   curl -s --max-time 25 -u "$1:$2" -L "https://$MAIL_HOST/.well-known/jmap"
 }
 
-# jmap_context <account> <password> -- authenticates once and prints "<api-url> <account-id>".
-# Both callers need exactly this pair, and fetching the session in each of them meant the
-# outbound poll re-authenticated on every 15s tick.
-JMAP_CONTEXT_ERROR=''
+# jmap_context <account> <password> -- authenticates once and prints EITHER
+#   OK <api-url> <account-id>
+# or
+#   ERR <reason>
+# Both callers need that pair, and fetching the session in each of them meant the outbound
+# poll re-authenticated on every 15s tick.
+#
+# The reason travels on STDOUT, not in a global. Callers invoke this inside `$(…)`, which
+# is a subshell, so a global set in here never reaches them -- an earlier version did
+# exactly that and reported a failed login with a completely blank reason, which is how a
+# real Stalwart restart showed up as an unexplained red line.
 jmap_context() {
   local account="$1" password="$2" session api_url account_id
-  JMAP_CONTEXT_ERROR=''
   session="$(jmap_session "$account" "$password")"
-  if ! JMAP_CONTEXT_ERROR="$(require_nonempty "JMAP session for $account" "$session")"; then
+  if [[ -z "${session//[[:space:]]/}" ]]; then
+    echo "ERR no response from https://$MAIL_HOST/.well-known/jmap -- is Stalwart up?"
     return 1
   fi
   if ! api_url="$(json_path "$session" 'apiUrl')"; then
-    JMAP_CONTEXT_ERROR='JMAP session has no apiUrl -- authentication most likely failed'
+    echo "ERR JMAP session has no apiUrl -- authentication most likely failed"
     return 1
   fi
   if ! account_id="$(json_path "$session" 'primaryAccounts.urn:ietf:params:jmap:mail')"; then
-    JMAP_CONTEXT_ERROR="session returned no primary mail account for $account"
+    echo "ERR session returned no primary mail account for $account"
     return 1
   fi
   # An absolute apiUrl on the wrong host is the specific breakage that takes the webmail
   # down when Stalwart's Default Hostname is wrong, so it is asserted rather than assumed.
   if [[ "$api_url" == http* && "$api_url" != "https://$MAIL_HOST"* ]]; then
-    JMAP_CONTEXT_ERROR="session advertises apiUrl '$api_url', which is not on $MAIL_HOST -- the webmail will break"
+    echo "ERR session advertises apiUrl '$api_url', which is not on $MAIL_HOST -- the webmail will break"
     return 1
   fi
   [[ "$api_url" == http* ]] || api_url="https://$MAIL_HOST$api_url"
-  printf '%s %s\n' "$api_url" "$account_id"
+  printf 'OK %s %s\n' "$api_url" "$account_id"
 }
 
 check_login() { # check_login <account>
@@ -527,8 +539,9 @@ check_login() { # check_login <account>
     echo "no password available -- set $(password_var_for "$account") in .env, or run interactively"
     return 1
   }
-  context="$(jmap_context "$account" "$password")" || { echo "$JMAP_CONTEXT_ERROR"; return 1; }
-  echo "account ${context#* }"
+  context="$(jmap_context "$account" "$password")"
+  [[ "$context" == OK\ * ]] || { echo "${context#ERR }"; return 1; }
+  echo "account ${context##* }"
 }
 
 # jmap_call <account> <password> <api-url> <method-calls-json> -- prints the raw response.
@@ -568,7 +581,28 @@ check_inbound() { # check_inbound <recipient>
   # The envelope sender is the relay's own hostname, never the domain under test: that
   # domain publishes SPF -all, so a probe claiming to be from it would be sent from an
   # unauthorised IP and correctly rejected -- a failure of the test, not of the server.
-  probe_from="verify-mail@\$(hostname -f)"
+  # Resolved HERE rather than left as an unexpanded `$(hostname -f)` for the remote shell,
+  # so that a rejection message can name the address the server actually saw. During an
+  # incident, "sender was verify-mail@$(hostname -f)" tells you nothing.
+  local relay_fqdn note=''
+  if [[ -n "$PROBE_FROM" ]]; then
+    probe_from="$PROBE_FROM"
+    relay_fqdn="${probe_from##*@}"
+  else
+    relay_fqdn="$(ssh -o ConnectTimeout=15 -o BatchMode=yes "$SMTP_VIA" 'hostname -f' 2>/dev/null | tr -d '\r' | head -n1)"
+    require_nonempty "fully-qualified hostname of relay $SMTP_VIA" "$relay_fqdn" || return 1
+    probe_from="verify-mail@$relay_fqdn"
+  fi
+
+  # A relay that never had its hostname set reports a placeholder like `prod2.domain.tld`,
+  # or a bare name. Stalwart logs the resulting EHLO as invalid and a stricter receiver
+  # would reject the probe outright -- a test artefact that looks exactly like a mail
+  # server fault. It is surfaced rather than hidden, and VERIFY_MAIL_PROBE_FROM overrides.
+  if [[ "$relay_fqdn" != *.* || "$relay_fqdn" == *.domain.tld || "$relay_fqdn" == *.localdomain \
+        || "$relay_fqdn" == localhost* ]]; then
+    note=" [relay hostname '$relay_fqdn' is a placeholder, so the probe's EHLO is not a real FQDN --"
+    note+=" set VERIFY_MAIL_PROBE_FROM if a receiver ever rejects it]"
+  fi
 
   # curl runs with -S so that a refusal comes back with the server's own SMTP reply text.
   # A rejected probe has two very different causes -- the mail server is broken, or the
@@ -583,7 +617,7 @@ check_inbound() { # check_inbound <recipient>
       printf 'To: <%s>\r\n' '$recipient'
       printf 'Subject: %s\r\n' '$subject'
       printf 'Date: %s\r\n' \"\$(date -R)\"
-      printf 'Message-ID: <%s@%s>\r\n' '$RUN_ID' \"\$(hostname -f)\"
+      printf 'Message-ID: <%s@%s>\r\n' '$RUN_ID' '$relay_fqdn'
       printf '\r\n'
       printf 'Automated inbound delivery probe from verify-mail.sh. Safe to delete.\r\n'
     } > \"\$TMP\"
@@ -598,7 +632,7 @@ check_inbound() { # check_inbound <recipient>
     echo "delivery to $mx:25 via $SMTP_VIA was not accepted (sender was $probe_from): $(tr '\n' ' ' <<<"$remote")"
     return 1
   fi
-  echo "accepted by $mx:25 (probe sent from $SMTP_VIA)"
+  echo "accepted by $mx:25 (probe sent from $SMTP_VIA as $probe_from)$note"
 }
 
 # ---------------------------------------------------------------------------------------
@@ -636,9 +670,11 @@ check_outbound() { # check_outbound <account>
   # Authenticate once, then poll the sending mailbox for the auto-responder's reply. The
   # wait is real: the report is generated only after the message is delivered and scanned.
   local context api_url account_id
-  context="$(jmap_context "$account" "$password")" || { echo "$JMAP_CONTEXT_ERROR"; return 1; }
+  context="$(jmap_context "$account" "$password")"
+  [[ "$context" == OK\ * ]] || { echo "${context#ERR }"; return 1; }
+  context="${context#OK }"
   api_url="${context%% *}"
-  account_id="${context#* }"
+  account_id="${context##* }"
 
   # The request body is built by json.dumps with the account id passed in as an argument.
   # It used to be built once and the account id patched in with a string substitution on

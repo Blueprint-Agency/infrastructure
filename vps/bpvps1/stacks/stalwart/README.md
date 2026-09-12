@@ -113,11 +113,21 @@ login, and both delivery legs. Run it before and after any change here; it chang
 > back over JMAP — the estate has an instance that has never written a log line, so nothing here is
 > proven by grepping our own logs. Mailbox passwords come from `.env` as `MAIL_PASSWORD_*`.
 
-> ⚠️ **Traefik and Stalwart can drift onto different copies of the same cert.** Verified 2026-09-12:
+> ⚠️ **Traefik and Stalwart can drift onto different copies of the same cert.** Hit on 2026-09-12:
 > port 443 served the **28 Jun** cert while port 465 served the **29 Aug** renewal — same names, same
-> files, different serials. `renew-cert.sh` restarts Stalwart but nothing makes Traefik re-read the
-> file, so the web UIs keep the old cert until Traefik is restarted, and expire on the old date.
-> That is why `verify-mail.sh` checks 443 and 465 separately rather than assuming one cert.
+> files, different serials, and 443 was 14 days from expiry. **Traefik watches its config file, not
+> the cert files the config points at**, so a renewal that swaps the certs without touching
+> `../traefik/dynamic/stalwart.yml` is never noticed. The README line claiming it "auto-reloads on
+> change" was wrong. Fixed by `touch`ing that yml — no restart, no downtime — and the permanent fix
+> (a `touch` at the end of `renew-cert.sh`) is tracked on #7. All three ports now serve the same
+> serial. That is why `verify-mail.sh` checks 443 and 465 separately rather than assuming one cert.
+
+> ⚠️ **Stalwart logs `Multiple TLS certificates available (total = 2)` continuously**, while
+> `/opt/stalwart/certs/` holds exactly one `fullchain.pem`. The second certificate is in the
+> **store** (admin UI → Settings → TLS), not on disk — a leftover entry from an earlier config.
+> Stalwart chooses between them, so which cert the mail ports present is not fully determined.
+> Verified 2026-09-12, not yet cleaned up. Check here first if a mail client ever complains about
+> a certificate while `verify-mail.sh` is green.
 
 ## Ops
 ```bash
