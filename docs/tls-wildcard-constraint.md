@@ -85,7 +85,8 @@ and then `vercel dns rm` of the old one, in that order, so the name was never em
 > `rua` points at a **different domain**, so RFC 7489 §7.1 wants `blueprintdigital.my` to
 > consent: `reservetoday.app._report._dmarc.blueprintdigital.my TXT "v=DMARC1"` (Cloudflare,
 > Blueprint account). Without it, compliant reporters drop the report instead of sending it.
-> Not yet published — add it with the rest of the mail records in #10.
+> Published 2026-09-12 (#14), alongside the matching `kaiteki.my._report._dmarc` record —
+> both point at the same one inbox, so both need consent.
 
 The MX / SPF / DKIM for this domain are **held back on purpose** (#10). The spec's MX target
 is the shared `mail.blueprintdigital.my`, which still resolves to bpvps2 until #9 moves it, and

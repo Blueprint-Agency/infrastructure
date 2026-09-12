@@ -87,16 +87,25 @@ ok  'spf neutral is never ok'       1 spf_check 'v=spf1 mx ?all' '-all'
 says 'spf names the mismatch' '~all' spf_check 'v=spf1 mx ~all' '-all'
 
 # --------------------------------------------------------------------------------------
-# dmarc_check <record> <expected-policy>
+# dmarc_check <record> <expected-policy> <expected-rua-address>
+# The rua address is asserted, not just its presence: "every domain reports to one inbox"
+# (#14) is only true while each record says so, and a registrar-style collector left
+# alongside ours would split the reports without ever failing a presence check.
 # --------------------------------------------------------------------------------------
-ok  'dmarc reject as expected'     0 dmarc_check 'v=DMARC1; p=reject; rua=mailto:admin@kaiteki.my; fo=1' 'reject'
-ok  'dmarc quarantine as expected' 0 dmarc_check 'v=DMARC1; p=quarantine; rua=mailto:a@b.c' 'quarantine'
-ok  'dmarc policy mismatch fails'  1 dmarc_check 'v=DMARC1; p=none; rua=mailto:a@b.c' 'reject'
-ok  'dmarc empty record fails'     1 dmarc_check '' 'reject'
-ok  'dmarc without v=DMARC1 fails' 1 dmarc_check 'p=reject; rua=mailto:a@b.c' 'reject'
-ok  'dmarc without rua fails'      1 dmarc_check 'v=DMARC1; p=reject' 'reject'
-ok  'dmarc with empty rua fails'   1 dmarc_check 'v=DMARC1; p=reject; rua=' 'reject'
-ok  'dmarc rua must be a mailto'   1 dmarc_check 'v=DMARC1; p=reject; rua=admin@kaiteki.my' 'reject'
+RUA='admin@blueprintdigital.my'
+ok  'dmarc reject as expected'     0 dmarc_check "v=DMARC1; p=reject; rua=mailto:$RUA; fo=1" 'reject' "$RUA"
+ok  'dmarc quarantine as expected' 0 dmarc_check "v=DMARC1; p=quarantine; adkim=r; aspf=r; rua=mailto:$RUA;" 'quarantine' "$RUA"
+ok  'dmarc policy mismatch fails'  1 dmarc_check "v=DMARC1; p=none; rua=mailto:$RUA" 'reject' "$RUA"
+ok  'dmarc empty record fails'     1 dmarc_check '' 'reject' "$RUA"
+ok  'dmarc without v=DMARC1 fails' 1 dmarc_check "p=reject; rua=mailto:$RUA" 'reject' "$RUA"
+ok  'dmarc without rua fails'      1 dmarc_check 'v=DMARC1; p=reject' 'reject' "$RUA"
+ok  'dmarc with empty rua fails'   1 dmarc_check 'v=DMARC1; p=reject; rua=' 'reject' "$RUA"
+ok  'dmarc rua must be a mailto'   1 dmarc_check "v=DMARC1; p=reject; rua=$RUA" 'reject' "$RUA"
+ok  'dmarc rua wrong inbox fails'  1 dmarc_check 'v=DMARC1; p=reject; rua=mailto:admin@kaiteki.my; fo=1' 'reject' "$RUA"
+says 'dmarc rua mismatch names both' "rua is 'mailto:admin@kaiteki.my', expected 'mailto:$RUA'" \
+  dmarc_check 'v=DMARC1; p=reject; rua=mailto:admin@kaiteki.my; fo=1' 'reject' "$RUA"
+ok  'dmarc second collector fails'  1 dmarc_check "v=DMARC1; p=reject; rua=mailto:$RUA,mailto:dmarc_rua@onsecureserver.net" 'reject' "$RUA"
+ok  'dmarc blank expected rua fails' 1 dmarc_check "v=DMARC1; p=reject; rua=mailto:$RUA" 'reject' ''
 
 # --------------------------------------------------------------------------------------
 # dkim_check <record>

@@ -239,7 +239,7 @@ CONF="$CONF_DIR/$DOMAIN.conf"
 source "$CONF"
 
 for key in MAIL_HOST WEBMAIL_HOST EXPECT_MX EXPECT_SPF_ALL EXPECT_DMARC_POLICY \
-           DKIM_SELECTORS BRANDING_EXPECT DEFAULT_ACCOUNTS; do
+           EXPECT_DMARC_RUA DKIM_SELECTORS BRANDING_EXPECT DEFAULT_ACCOUNTS; do
   value="${!key-}"
   [[ -n "${value//[[:space:]]/}" ]] || die "$CONF sets $key to an empty value -- a blank expectation is not a check"
 done
@@ -365,7 +365,7 @@ check_spf() {
 check_dmarc() {
   local record
   record="$(dns_txt "_dmarc.$DOMAIN" | grep -i '^v=DMARC1' | head -n1)"
-  dmarc_check "$record" "$EXPECT_DMARC_POLICY" || return 1
+  dmarc_check "$record" "$EXPECT_DMARC_POLICY" "$EXPECT_DMARC_RUA" || return 1
   echo "$record"
 }
 

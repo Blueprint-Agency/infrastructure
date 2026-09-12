@@ -127,14 +127,17 @@ tag_value() {
 }
 
 # ---------------------------------------------------------------------------------------
-# dmarc_check <txt-record> <expected-policy>
+# dmarc_check <txt-record> <expected-policy> <expected-rua-address>
 # A DMARC record with no `rua=` is the common half-configured case: the policy is
 # published but nobody ever sees a report, so a spoofing run against the domain is
-# invisible. Treated as a failure.
+# invisible. Treated as a failure. The address is asserted too, as the whole `rua` value:
+# every domain reports to ONE inbox (#14), and a second collector left in the list -- a
+# registrar's, typically -- splits the reports without ever failing a presence check.
 # ---------------------------------------------------------------------------------------
 dmarc_check() {
-  local record="${1-}" expected="${2-}"
+  local record="${1-}" expected="${2-}" expected_rua="${3-}"
   require_nonempty 'DMARC record' "$record" || return 1
+  require_nonempty 'expected DMARC rua address' "$expected_rua" || return 1
 
   record="${record//\"/}"
   if [[ "$record" != v=DMARC1* ]]; then
@@ -159,6 +162,10 @@ dmarc_check() {
   require_nonempty 'DMARC rua address' "$rua" || return 1
   if [[ "$rua" != mailto:* ]]; then
     echo "DMARC rua is not a mailto: URI: $rua"
+    return 1
+  fi
+  if [[ "$rua" != "mailto:$expected_rua" ]]; then
+    echo "DMARC rua is '$rua', expected 'mailto:$expected_rua'"
     return 1
   fi
   return 0
