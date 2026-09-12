@@ -53,8 +53,12 @@ covers `teeko.ai`. That one token is a **Blueprint-account** token and is scoped
 zones, which is the whole reason a single certificate can span them. Cert lands in
 `./certs/{fullchain,key}.pem`.
 - **Traefik** serves it via the file provider (`stalwart.yml`).
-- **Stalwart** reads the same files for mail TLS — set in the admin UI → Settings → TLS as
-  **File** references. ⚠️ The files must be readable by Stalwart's user: `chown 2000:2000 ./certs/*.pem`.
+- **Stalwart** reads the same files for mail TLS through **one `x:Certificate` object in the
+  store** whose `certificate` / `privateKey` are `@type: File` pointers at
+  `/opt/stalwart/certs/{fullchain,key}.pem` — a *pointer*, not a copy, so a renewal only has
+  to swap the files and restart Stalwart. That object is pinned as
+  `x:SystemSettings.defaultCertificateId` (#17; id in the state table at the bottom).
+  ⚠️ The files must be readable by Stalwart's user: `chown 2000:2000 ./certs/*.pem`.
 - Renewal: `renew-cert.sh` (daily host cron) re-runs acme.sh (it **reads `CF_Token` from the
   stack `.env`** — the saved-creds path is unreliable), reinstalls to `./certs`, re-chowns,
   restarts Stalwart, and **touches `../traefik/dynamic/stalwart.yml`** so Traefik re-reads the
@@ -111,10 +115,6 @@ Zone `blueprintdigital.my` (`32c3ac…`), moved here from bpvps2 on 2026-09-12 (
 
 > Both zones' mail records are on a **300 s TTL**, so a DNS rollback lands in minutes.
 
-PTR (Hostinger hPanel, manual — no API token for this account): `187.127.122.41` should
-read **`mail.blueprintdigital.my`**, the name Stalwart announces at SMTP greeting time
-(FCrDNS / deliverability). ⚠️ **Still `mail.kaiteki.my` as of the #9 cutover** — the hPanel
-change is pending; FCrDNS still resolves, so deliverability is unaffected until it is done.
 Zone `reservetoday.app` — **not Cloudflare: Vercel is authoritative** (`vercel dns … --scope
 blueprintdigitalmy`; the Cloudflare zone of that name is a dead copy). Published 2026-09-12 (#10):
 
@@ -129,6 +129,10 @@ blueprintdigitalmy`; the Cloudflare zone of that name is a dead copy). Published
 > reports show Clerk passing — a hardfail here can send the booking product's magic links to
 > spam. The full reasoning and the record diffs are in `docs/tls-wildcard-constraint.md`.
 
+PTR (Hostinger hPanel, manual — no API token for this account): `187.127.122.41` should
+read **`mail.blueprintdigital.my`**, the name Stalwart announces at SMTP greeting time
+(FCrDNS / deliverability). ⚠️ **Still `mail.kaiteki.my` as of the #9 cutover** — the hPanel
+change is pending; FCrDNS still resolves, so deliverability is unaffected until it is done.
 
 > **Anti-spoof: SPF `-all` + DMARC `p=reject` (hardfail) — do not loosen.** `mx` (this VPS)
 > is the *only* authorized sender, so hardfail is safe. Set 2026-07-30 after a forged
@@ -149,8 +153,9 @@ blueprintdigitalmy`; the Cloudflare zone of that name is a dead copy). Published
   > self-service Portal. The management surface IS the JMAP `x:` API below, on every 0.16.x.
 - **Only 25/465/993/995/4190 actually serve.** The compose also publishes 587/143/110 but
   Stalwart has **no listener** on them (implicit-TLS-only setup), so those three are dead
-  ports — a connection is accepted by docker-proxy and then dropped. Add the listener in the
-  admin UI *first* if a client ever needs STARTTLS submission. 4190 listens but is blocked at
+  ports — a connection is accepted by docker-proxy and then dropped. Add the listener
+  (`x:NetworkListener/set`, "Configuring this build") *first* if a client ever needs STARTTLS
+  submission. 4190 listens but is blocked at
   the Hostinger firewall.
 - **`config.json` is persistence-critical** — the storage pointer Stalwart reads on boot
   (`/etc/stalwart/config.json`), bind-mounted from `./config.json`. Without it a container
@@ -242,13 +247,21 @@ login, and both delivery legs. Run it before and after any change here; it chang
 > ports serve the same serial. That is why `verify-mail.sh` checks 443 and 465 separately rather
 > than assuming one cert.
 
-> **Stalwart logs `Multiple TLS certificates available` continuously — the number is SAN
-> NAMES, not certificates, and it is harmless.** The earlier reading of this, that a leftover
-> entry in the store meant "which cert the mail ports present is not fully determined", was
-> wrong and is corrected here. `total` went from **2 to 4 at the exact moment** the cert went
-> from two names to four (2026-09-12), with one `fullchain.pem` on disk throughout and no
-> change to the store. It is counting resolvable SNI names. There is one certificate and
-> `verify-mail.sh` checks its serial on 443 and 465 separately, which is the real guard.
+> **`Multiple TLS certificates available … total = 4` (event `tls.multiple-certificates-available`)
+> was SAN NAMES, not certificates, and it is silenced since #17 (2026-09-12).**
+> `x:Certificate/get` returned exactly **one** object throughout; `total` went from 2 to 4 at
+> the moment the cert went from two names to four. What was observed:
+> `x:SystemSettings.defaultCertificateId` was `null`, and the warning fired every 30 s.
+> Setting it to the file cert's id and restarting Stalwart stopped it (0 in the next 10 min,
+> versus one per 30 s before). On that day 443/465/993 — `openssl s_client` with and without
+> `-servername` — all served the file serial; the standing guard is `verify-mail.sh`, which
+> checks the serial on 443 and 465 separately. **In-store ACME stays off**:
+> `x:AcmeProvider/get` is empty and all three domains are `certificateManagement: Manual`.
+> Keep it that way — the one certificate is shared with Traefik and renewed by
+> `renew-cert.sh` (above); an `Automatic` domain would put a second, separately-renewed
+> certificate in the store that Traefik never sees. If the warning comes back, check two
+> things: `x:Certificate/get` has grown a second object, or `defaultCertificateId` no longer
+> points at the one that exists (a store restore or a re-created object gets a new id).
 
 ## Ops
 ```bash
@@ -360,6 +373,9 @@ The objects this stack has needed so far, with the exact shapes that worked:
 | Default hostname | `x:SystemSettings/set` `{"update":{"singleton":{"defaultHostname":"…"}}}` — ⚠️ read the hostname warning above first |
 | Trust `X-Forwarded-For` | `x:Http/set` `{"update":{"singleton":{"useXForwarded":true}}}` |
 | Allowed (never-banned) networks | `x:AllowedIp/set` `{"create":{"n0":{"address":"172.16.0.0/12","reason":"…"}}}` — `address` is immutable: to change one, create the new entry and `destroy` the old id |
+| List TLS certificates (SANs, issuer, expiry are server-derived from the file) | `x:Certificate/get` `{"properties":["id","certificate","issuer","notValidAfter","subjectAlternativeNames"]}` — here `certificate`/`privateKey` are `{"@type":"File","filePath":"…"}` |
+| Pin which cert the mail ports present without SNI (silences `multiple-certificates-available`; needs a restart) | `x:SystemSettings/set` `{"update":{"singleton":{"defaultCertificateId":"<x:Certificate id>"}}}` |
+| See whether anything mints certs in-store | `x:AcmeProvider/get` `{}` (must stay empty) and `x:Domain/get` `{"properties":["name","certificateManagement"]}` (must all be `{"@type":"Manual"}`) |
 
 Singletons are addressed by the literal id `"singleton"`. Tagged unions use `"@type"`. Lists
 are objects keyed `"0"`, `"1"`, …. `query` filters are flat (`{"filter":{"name":"example.my"}}`)
@@ -378,19 +394,20 @@ and only indexed properties filter. There is no `changes`/`queryChanges` for `x:
 > or settings. It is not an admin CLI. Its "Missing value for argument" response to every
 > input is why it was written off; the answer was never there anyway.
 
-**State of this instance after 2026-09-12 (issue #8):**
+**State of this instance as of 2026-09-12 (#8, #9, #17):**
 
 | Object | Value |
 |---|---|
 | Domains | `kaiteki.my` (id `b`), `blueprintdigital.my` (`c`), `reservetoday.app` (`d`) — all with automatic DKIM |
 | Administrator | **`admin@blueprintdigital.my`** (id `t`). `admin@kaiteki.my` (id `b`) is a plain `User` mailbox again. The recovery admin in `.env` is unchanged. |
 | `blueprintdigital.my` mailboxes | `admin@` (`t`), `chriskke@` (`u`), `danielchua@` (`v`), `yuchen@` (`w`) — the last three re-created from bpvps2 in #9 with fresh passwords (`MAIL_PASSWORD_*` in the repo `.env`) |
+| `reservetoday.app` mailboxes | `hello@` (`x`, #15), `admin@` (`y`, #10) — both plain `User`; the domain's DNS went live 2026-09-12 (#10) |
 | `defaultHostname` | **`mail.blueprintdigital.my`** since #9 (2026-09-12), moved together with the A records — see the hostname warning |
 | `useXForwarded` | `true` (was already) |
 | Allowed IPs | `172.16.0.0/12` (Docker default pool; replaced the `/16`), `60.54.118.137` (Kaiteki office) |
+| TLS | one `x:Certificate` (`iydcxwghksqa`, `File` → `/opt/stalwart/certs/{fullchain,key}.pem`), pinned as `defaultCertificateId` since #17; `x:AcmeProvider` empty; every domain `certificateManagement: Manual` |
 
 `scripts/mail-inventory.py` and anything else that reads other people's mailboxes must now
 authenticate as `admin@blueprintdigital.my` (`INVENTORY_ACCOUNT` in the domain conf,
 `MAIL_PASSWORD_ADMIN_BLUEPRINTDIGITAL_MY` in `.env`). The Kaiteki admin can still list
 accounts, but every read of another mailbox is `forbidden`.
-| `reservetoday.app` mailboxes | `hello@` (`x`, #15), `admin@` (`y`, #10) — both plain `User`; the domain's DNS went live 2026-09-12 (#10) |
