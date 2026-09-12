@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 352 64" width="352" height="64" role="img" aria-label="Blueprint">
+  <!-- Monogram plate from blueprint_marketing_website/app/icon.svg: night ground, tungsten card, ink B.
+       On a dark ground the plate gets a plum-edge rule so it does not dissolve into the page. -->
+  <rect width="64" height="64" rx="6" fill="#1c1039" stroke="#6b2f8a" stroke-width="2"/>
+  <path d="M4 3 L60 7 L57 61 L7 58 Z" fill="#ffb13c"/>
+  <text x="32" y="47" font-family="Archivo, 'Arial Narrow', Arial, sans-serif" font-size="46"
+        font-weight="900" text-anchor="middle" fill="#0d0619">B</text>
+  <!-- Wordmark in the display face; card-stock cream on a dark ground. -->
+  <text x="80" y="45" font-family="Archivo, 'Arial Narrow', Arial, sans-serif" font-size="40"
+        font-weight="900" letter-spacing="-0.6" fill="#fff8e6">Blueprint</text>
+</svg>

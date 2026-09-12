@@ -43,3 +43,11 @@ instance and `Quota/get` accordingly returns an empty list for every account.
 | File | Domain | Taken | Why |
 |---|---|---|---|
 | `kaiteki.my-inventory-2026-09-12.json` | kaiteki.my | 2026-09-12 | The **before** half for the Stalwart consolidation (#5), captured alongside the verified backup in #7. 17 accounts, 158,907 messages. |
+
+## Branding screenshots
+
+`branding-screenshots/<brand>-<light|dark>-<desktop|phone>.png` — the two webmail login pages
+as delivered in #11 (2026-09-12), at 1280px and 400px, in both colour schemes. Taken with
+Playwright against the live hostnames, `color_scheme` emulated, PWA install nag dismissed.
+They are evidence for the ticket, not a spec: the branding itself is
+`vps/bpvps1/stacks/stalwart/docker-compose.yml`.

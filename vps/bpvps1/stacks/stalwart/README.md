@@ -171,6 +171,35 @@ change is pending; FCrDNS still resolves, so deliverability is unaffected until 
   Re-test with: `docker run --rm --network stalwart_mailnet --dns 172.16.3.53 alpine nslookup
   2.0.0.127.zen.spamhaus.org` → must return `127.0.0.2/4/10`.
 
+## Branding — one Bulwark, a different brand per webmail hostname
+`webmail.kaiteki.my` shows the Kaiteki mark and "Kaiteki Mail"; `webmail.blueprintdigital.my`
+shows the Blueprint lockup and "Blueprint Mail". Same container. Bulwark picks the brand from
+the request `Host` / `X-Forwarded-Host` (Traefik forwards both) and answers it at
+`/api/config`, which is what `verify-mail.sh` asserts per domain (`BRANDING_EXPECT` in
+`scripts/verify-mail.d/<domain>.conf`).
+
+- **It is all compose environment, never the admin dashboard.** `APP_NAME`, `FAVICON_URL`,
+  `PWA_*`, `LOGIN_*` are the agency defaults; `DOMAIN_BRANDING` (one JSON array, folded over
+  several lines in `docker-compose.yml`) carries the per-hostname overrides. The dashboard's
+  branding page writes to the `bulwark-admin` volume, which is not backed up and is not in git
+  — and anything set there **silently overrides** the env, so if a value on the page does not
+  match the compose file, look at `/admin` before anything else.
+- **Logo files live in `./branding/<brand>/` and are bind-mounted** to
+  `/app/public/branding/<brand>` (read-only). Next.js serves `/app/public` from disk at request
+  time, so a new file is live on the next request; no image rebuild. Each brand has a light and a
+  dark login logo — Kaiteki's dark one is the same PNG with the taupe lifted to cream.
+- **The login page's colours are Bulwark's, not ours.** The supported branding surface is logos,
+  names, links, favicon and the PWA theme/background colours (`#1c1039` / `#120926`, from the
+  marketing site's tokens). The blue button and the card are Bulwark's stock theme; changing
+  them means a Bulwark *theme*, which #5 puts out of scope. The version line is off
+  (`LOGIN_SHOW_VERSION=false`).
+- **Onboarding a client's webmail** = a DNS record for `webmail.<client>`, a Traefik router +
+  CORS origin (`../traefik/dynamic/stalwart.yml`), the name added to `CERT_NAMES` in
+  `renew-cert.sh`, a folder under `./branding/`, a mount line, a `DOMAIN_BRANDING` entry, and a
+  `scripts/verify-mail.d/<domain>.conf`. Never a second container.
+- To push a change: `docker compose up -d bulwark` on the host (see Ops for how to get files
+  into the root-owned stack dir). Bulwark reads `DOMAIN_BRANDING` at startup.
+
 ## Verifying it works
 `../../../../scripts/verify-mail.sh kaiteki.my admin@kaiteki.my` (from the repo root:
 `./scripts/verify-mail.sh kaiteki.my`) checks this stack end to end from outside — MX/SPF/DKIM/DMARC,

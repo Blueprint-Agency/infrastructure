@@ -249,15 +249,17 @@ san_covers() {
 
 # ---------------------------------------------------------------------------------------
 # json_str <json> <key>
-# Reads one string field from the flat, string-valued JSON that Bulwark's /api/config
-# returns. Deliberately not a JSON parser and not jq: this keeps verify-mail.sh runnable
-# on a bare laptop with only curl and openssl. Returns 1 when the key is ABSENT and
-# prints the value (possibly empty) when it is present -- the caller needs to tell those
-# two apart, because "field missing" and "field blank" are different bugs.
+# Reads one scalar field from the flat JSON that Bulwark's /api/config returns: a string,
+# or one of the bare booleans (`"loginShowVersion":false` is how "version hidden" comes
+# back, and it is asserted like any other field). Deliberately not a JSON parser and not
+# jq: this keeps verify-mail.sh runnable on a bare laptop with only curl and openssl.
+# Returns 1 when the key is ABSENT and prints the value (possibly empty) when it is
+# present -- the caller needs to tell those two apart, because "field missing" and "field
+# blank" are different bugs. Booleans print as the literal words true / false.
 # ---------------------------------------------------------------------------------------
 json_str() {
   local json="${1-}" key="${2-}" match
-  match="$(grep -oE "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" <<<"$json" | head -n1)" || true
+  match="$(grep -oE "\"$key\"[[:space:]]*:[[:space:]]*(\"[^\"]*\"|true|false)" <<<"$json" | head -n1)" || true
   if [[ -z "$match" ]]; then
     return 1
   fi
@@ -272,8 +274,9 @@ json_str() {
 # branding_check <config-json> <field> <expected>
 # An unbranded Bulwark answers 200 with stock logos and empty strings for the company
 # name, which is exactly why "the endpoint responded" is not the check. The field must be
-# present, non-empty, equal to what the domain's config expects, and -- for appName --
-# not the stock product name.
+# present, non-empty, equal to what the domain's config expects, and never a stock value:
+# neither the product name nor one of Bulwark's own logo files, which is what every URL
+# field points at on an instance that has had nothing mounted over them.
 # ---------------------------------------------------------------------------------------
 branding_check() {
   local json="${1-}" field="${2-}" expected="${3-}"
@@ -292,6 +295,10 @@ branding_check() {
   case "$field:$actual" in
     appName:Bulwark)
       echo "branding field 'appName' is the stock 'Bulwark' -- no branding applied"
+      return 1
+      ;;
+    *:/branding/Bulwark_*)
+      echo "branding field '$field' is the stock Bulwark asset '$actual' -- no logo applied"
       return 1
       ;;
   esac

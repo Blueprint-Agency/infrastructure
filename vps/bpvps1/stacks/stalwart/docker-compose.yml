@@ -101,17 +101,70 @@ services:
       # docs/mail/hostname-cutover-constraint.md.
       - JMAP_SERVER_URL=https://mail.blueprintdigital.my
       - STALWART_FEATURES=true                    # password change, Sieve filters, etc.
-      # Left as-is deliberately: this is the one Bulwark instance every domain's webmail
-      # hostname lands on, so changing it here renames KAITEKI's webmail too. Per-hostname
-      # branding (DOMAIN_BRANDING) is the fix, and it is a separate piece of work.
-      - APP_NAME=Kaiteki Mail
       - SETTINGS_SYNC_ENABLED=true                # server-side per-user settings (needs SESSION_SECRET)
       # ⚠️ NEVER rotate SESSION_SECRET. It encrypts the per-user settings already written to
       # the bulwark-settings volume; a new value does not log people out, it makes every
       # existing user's saved settings undecryptable.
       - SESSION_SECRET=${BULWARK_SESSION_SECRET}  # openssl rand -base64 32; real value in stack .env
       - ADMIN_PASSWORD=${BULWARK_ADMIN_PASSWORD}  # enables Bulwark's built-in admin dashboard (/admin)
+      #
+      # ---- Branding (#11) -------------------------------------------------------------
+      # Everything below is ENV, never a dashboard upload: the bulwark-admin volume is not
+      # backed up, and an admin-dashboard value would silently override all of this (it is
+      # the top of Bulwark's priority chain). The files live in ./branding, mounted below.
+      #
+      # The globals are the agency default. Each webmail hostname then overrides what
+      # differs in DOMAIN_BRANDING, matched on the request Host / X-Forwarded-Host, so one
+      # container answers as a different brand per URL. Onboarding a client's webmail is
+      # one more entry here plus its logos under ./branding/<client>/ -- never a second
+      # container. Colours are blueprint_marketing_website design tokens: night #1c1039,
+      # night-deep #120926, tungsten #ffb13c.
+      - APP_NAME=Blueprint Mail
+      - APP_SHORT_NAME=Mail
+      - APP_DESCRIPTION=Webmail for Blueprint Digital and its clients
+      - FAVICON_URL=/branding/blueprint/icon.svg
+      - PWA_ICON_URL=/branding/blueprint/icon.svg
+      - PWA_THEME_COLOR=#1c1039
+      - PWA_BACKGROUND_COLOR=#120926
+      - APP_LOGO_LIGHT_URL=/branding/blueprint/login-light.svg
+      - APP_LOGO_DARK_URL=/branding/blueprint/login-dark.svg
+      - LOGIN_LOGO_LIGHT_URL=/branding/blueprint/login-light.svg
+      - LOGIN_LOGO_DARK_URL=/branding/blueprint/login-dark.svg
+      - LOGIN_COMPANY_NAME=Blueprint Digital
+      - LOGIN_WEBSITE_URL=https://blueprintdigital.my
+      - LOGIN_LOGO_MAX_HEIGHT=64px
+      # Login page chrome, set on purpose rather than left to defaults. The version number
+      # is hidden: it advertised the exact build to anyone scanning us. Heading and
+      # subtitle stay (they carry the company name); TOTP stays because accounts may
+      # enable 2FA in Stalwart and the field must be there when they do.
+      - LOGIN_SHOW_VERSION=false
+      - LOGIN_SHOW_HEADING=true
+      - LOGIN_SHOW_SUBTITLE=true
+      - LOGIN_SHOW_TOTP=true
+      # One JSON array. Folded (>-) so each hostname is its own line in the diff; YAML
+      # joins the lines with single spaces, which JSON does not mind. The Kaiteki mark is
+      # the PNG from blueprint_marketing_website/public/logos (also kaiteki/public/brand);
+      # login-dark.png is the same file with the taupe lifted to cream for a dark ground.
+      - >-
+        DOMAIN_BRANDING=[
+        {"host":"webmail.kaiteki.my",
+        "appName":"Kaiteki Mail","appShortName":"Kaiteki","appDescription":"Webmail for Kaiteki",
+        "faviconUrl":"/branding/kaiteki/favicon.png","pwaIconUrl":"/branding/kaiteki/favicon.png",
+        "pwaThemeColor":"#ada190","pwaBackgroundColor":"#ffffff",
+        "appLogoLightUrl":"/branding/kaiteki/login-light.png","appLogoDarkUrl":"/branding/kaiteki/login-dark.png",
+        "loginLogoLightUrl":"/branding/kaiteki/login-light.png","loginLogoDarkUrl":"/branding/kaiteki/login-dark.png",
+        "loginCompanyName":"Kaiteki","loginWebsiteUrl":"https://kaiteki.my"},
+        {"host":"webmail.blueprintdigital.my",
+        "appName":"Blueprint Mail","loginCompanyName":"Blueprint Digital","loginWebsiteUrl":"https://blueprintdigital.my"}
+        ]
     volumes:
+      # Logo files, served by Bulwark at /branding/<brand>/... beside its own stock marks
+      # (Next.js serves /app/public from disk at request time, so a bind mount is enough;
+      # verified 2026-09-12). One mount per brand, as a SUBDIRECTORY rather than over the
+      # whole of /app/public/branding, so the stock files still exist for any field that
+      # falls back to them. A new client = a new line here + a DOMAIN_BRANDING entry.
+      - ./branding/blueprint:/app/public/branding/blueprint:ro
+      - ./branding/kaiteki:/app/public/branding/kaiteki:ro
       - bulwark-settings:/app/data/settings        # encrypted per-user settings
       - bulwark-admin:/app/data/admin              # admin config, plugins, themes, branding
       - bulwark-admin-state:/app/data/admin-state  # admin login state, audit log, setup token
