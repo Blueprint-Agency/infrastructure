@@ -7,9 +7,8 @@ services:
       - "--api.dashboard=true"
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
-      # File provider supplies the Stalwart/Bulwark routes + the blueprintdigital.my cert.
-      - "--providers.file.directory=/dynamic"
-      - "--providers.file.watch=true"
+      # No file provider. It carried only the blueprintdigital.my mail routes and cert, and
+      # the mail stack left this host on 2026-09-12 (#12) -- mail is bpvps1's job now.
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
       - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
@@ -45,9 +44,6 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - traefik-letsencrypt:/letsencrypt
-      - ./dynamic:/dynamic:ro
-      # Shared blueprintdigital.my cert (acme.sh DNS-01) used for the mail web UIs.
-      - /root/stacks/stalwart/certs:/certs:ro
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.dashboard.rule=Host(`traefik-bpvps2.${BASE_DOMAIN}`)"
@@ -62,12 +58,6 @@ services:
       - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
     networks:
       proxy: {}
-      # Alias mail.blueprintdigital.my -> Traefik on the mail network, so the Bulwark webmail
-      # container resolves the Stalwart JMAP host (https://mail.blueprintdigital.my) to Traefik
-      # and gets a valid cert; Traefik then proxies to stalwart:8080.
-      mailnet:
-        aliases:
-          - mail.blueprintdigital.my
 
 volumes:
   traefik-letsencrypt:
@@ -77,8 +67,3 @@ volumes:
 networks:
   proxy:
     external: true
-  # Lets Traefik reach the co-hosted Stalwart + Bulwark containers.
-  # Created by the stalwart stack at /root/stacks/stalwart.
-  mailnet:
-    external: true
-    name: stalwart_mailnet

@@ -45,6 +45,7 @@ instance and `Quota/get` accordingly returns an empty list for every account.
 |---|---|---|---|
 | `kaiteki.my-inventory-2026-09-12.json` | kaiteki.my | 2026-09-12 | The **before** half for the Stalwart consolidation (#5), captured alongside the verified backup in #7. 17 accounts, 158,907 messages. |
 | `platform-inventory-2026-09-12-after-issue15.json` | all three (run as `blueprintdigital.my`) | 2026-09-12 | After the staff mailboxes (#15). 23 accounts: Kaiteki's same 17 by name, 15 of them byte-identical to the after-#8 capture; `admin@kaiteki.my` (+16 messages) and `ks.finance@kaiteki.my` (+1) had simply received mail in between — live inboxes, not drift. Plus `admin@`/`chriskke@`/`danielchua@`/`yuchen@blueprintdigital.my` and `admin@`/`hello@reservetoday.app`. |
+| `platform-inventory-2026-09-12-after-issue12.json` | all three | 2026-09-12 15:38Z | The **after** half for #5, taken once bpvps2's mail stack was gone (#12). Against the **before**: all 17 Kaiteki accounts present, **15 byte-identical**, and the other two only grew — `admin@kaiteki.my` 144,737 → 144,759 messages, `ks.finance@kaiteki.my` 677 → 678. Nothing shrank. 23 accounts total, 158,949 messages. |
 
 > **The script lists the whole platform, whatever domain you name.** `Principal/get`
 > enumerates every account on the instance; the domain argument only picks the conf (and

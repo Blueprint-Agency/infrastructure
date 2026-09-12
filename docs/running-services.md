@@ -1,6 +1,7 @@
 # Running Services — All VPS
 
-Snapshot: 2026-07-21, after the pgAdmin/Portainer/webapp teardown.
+Snapshot: 2026-07-21, after the pgAdmin/Portainer/webapp teardown. The two Blueprint hosts
+(bpvps1, bpvps2) were re-snapshotted on 2026-09-12 after the mail consolidation (#5 / #12).
 Source: `docker ps` + Traefik `Host()` labels on each VPS.
 
 ## bp-vps1-staging (`staging`) — 2 vCPU / 8GB
@@ -64,7 +65,7 @@ Removing any one breaks that URL's auth. Nothing here is redundant.
 
 `waba-db` has no app container running against it.
 
-## bp-bpvps1 (`bpvps1`)
+## bp-bpvps1 (`bpvps1`) — 187.127.122.41 — refreshed 2026-09-12
 
 | Container | Image | Domain |
 |---|---|---|
@@ -73,10 +74,18 @@ Removing any one breaks that URL's auth. Nothing here is redundant.
 | kaiteki-staging | blueprintagency/kaiteki-web:staging | staging.kaiteki.my |
 | wordpress | wordpress:php8.2-apache | blog.kaiteki.my |
 | wp-db | mariadb:11.4 | — |
-| stalwart | stalwartlabs/stalwart:latest | mail ports 25/110/143/465/587/993/995/4190 |
-| bulwark | ghcr.io/bulwarkmail/webmail:latest | — (no Host label) |
+| stalwart | stalwartlabs/stalwart:v0.16.21 (pinned) | mail ports 25/465/993/995/4190 (587/143/110 published, no listener); `mail.blueprintdigital.my` + `mail.kaiteki.my` via Traefik file provider |
+| unbound | klutchell/unbound:latest | — (resolver for stalwart; DNSBLs need it) |
+| bulwark | ghcr.io/bulwarkmail/webmail:latest | `webmail.blueprintdigital.my` + `webmail.kaiteki.my` via Traefik file provider |
 
-## bp-bpvps2 (`bpvps2`) — 187.127.207.82
+**The mail platform.** One Stalwart + one Bulwark serve every domain: `kaiteki.my`,
+`blueprintdigital.my`, `reservetoday.app`. `mail.blueprintdigital.my` is the canonical host
+(Stalwart's default hostname, MX for every domain except kaiteki.my); `mail.kaiteki.my` is
+the same box under its older name. Consolidated here from bpvps2 on 2026-09-12 (#5). Stack
+README: `vps/bpvps1/stacks/stalwart/README.md`; onboarding a domain: the
+`onboard-mail-domain` skill.
+
+## bp-bpvps2 (`bpvps2`) — 187.127.207.82 — refreshed 2026-09-12
 
 | Container | Image | Domain |
 |---|---|---|
@@ -85,9 +94,9 @@ Removing any one breaks that URL's auth. Nothing here is redundant.
 | booking-db-staging | postgres:16-alpine | — |
 | booking-be-prod | blueprintagency/booking-be:latest | api.reservetoday.app |
 | booking-db-prod | postgres:16-alpine | — |
-| stalwart | stalwartlabs/stalwart:v0.16.21 | mail ports |
-| unbound | klutchell/unbound:latest | — (resolver for stalwart) |
-| bulwark | ghcr.io/bulwarkmail/webmail:latest | — (no Host label) |
+
+No mail here. The `stalwart` / `unbound` / `bulwark` trio that served `blueprintdigital.my`
+from 2026-08-06 was removed on 2026-09-12 (#12) — see "Removed 2026-09-12" below.
 
 booking-system is a **multi-tenant** platform: one deployment serves every studio, and a
 studio is a Tenant row in `tenants` — never its own stack, container or database. The two
@@ -102,6 +111,19 @@ for why DNS-01 and wildcards are not available for this zone.
 
 Moved here from VPS3 on 2026-07-21. Deploys are driven by `deploy-be.yml` in
 `Blueprint-Agency/booking-system`, not from this repo.
+
+## Removed 2026-09-12 (#12)
+
+| What | Where | Notes |
+|---|---|---|
+| stalwart, unbound, bulwark | bpvps2 | `blueprintdigital.my` mail moved to bpvps1 in #9 (A records 13:58:55Z); this copy came down at 15:21:12Z, 82 min later, after JMAP confirmed **zero** messages had arrived on it since the cutover (newest mail 2026-08-31). Its 52 MB of test mail was discarded, not migrated. |
+| `stalwart_stalwart-data`, `stalwart_bulwark-{settings,admin,admin-state,telemetry}` | bpvps2 | All five named volumes removed (`compose down -v`). `stalwart_mailnet` went with them. |
+| `/root/stacks/stalwart/` + `dynamic/stalwart.yml` | bpvps2 | Traefik lost its file provider, the `/certs` mount and the `mailnet` alias (recreated 15:20:54Z, ~18 s). The `acme/` tree was root-owned and had to be deleted through an `alpine` container. |
+| `renew-cert.sh` daily cron | bpvps2 | `deploy`'s crontab is now empty. The zone-scoped `BPD_CF_DNS_API_TOKEN` it used went with the stack `.env` — **revoke it in the Blueprint Cloudflare dashboard**. |
+| `stalwart_roundcube-data` | bpvps1 | 33.7 MB orphan from the Roundcube → Bulwark switch; nothing mounted it. |
+
+**Firewall group 319466 was not touched** — it is shared with bpvps1, so closing the mail ports
+here would close them on the mail host. RAM on bpvps2: 1248 → 974 MB used.
 
 ## Removed 2026-07-21
 

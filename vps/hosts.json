@@ -8,8 +8,8 @@
     "exclude": "stalwart traefik wordpress", "app_stacks": "" },
 
   { "key": "bpvps2", "dir": "vps/bpvps2", "env_name": "prod",
-    "_comment": "stalwart holds hand-managed mail secrets and has no CI case arm; excluded. booking is one repo stack deployed twice, each destination carrying its own env_name.",
-    "exclude": "stalwart", "app_stacks": "booking-staging booking-prod",
+    "_comment": "No mail here since 2026-09-12 (#12) -- the stalwart stack and its exclude went with it. booking is one repo stack deployed twice, each destination carrying its own env_name.",
+    "exclude": "", "app_stacks": "booking-staging booking-prod",
     "fanout": { "booking": [ { "dir": "booking-staging", "env_name": "staging" },
                              { "dir": "booking-prod",    "env_name": "prod"    } ] } }
 ]

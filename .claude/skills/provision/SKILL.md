@@ -10,6 +10,10 @@ contract. This skill is the ordered procedure; CLAUDE.md is the state.
 
 Two branches. A new host that also needs stacks is branch A then branch B.
 
+**A new mail domain is neither branch.** Mail is one Stalwart on bpvps1 serving every
+domain; a client is rows added to it, not a stack. That checklist is the
+`onboard-mail-domain` skill, next to this one.
+
 Steps marked **[human]** cannot be done from here — no API token exists for them.
 Do everything else yourself, then hand the human a numbered list of only the
 **[human]** steps left, and wait.

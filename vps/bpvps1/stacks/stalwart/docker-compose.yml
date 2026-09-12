@@ -96,7 +96,7 @@ services:
       #
       # So this name's PUBLIC A record must be this server. Point it at a name that resolves
       # elsewhere and every webmail user is sent there — with a valid certificate and no
-      # error, if that host also runs a mail server (bpvps2 still does until #12). The hostname
+      # error, if that host also runs a mail server (bpvps2 did, until #12). The hostname
       # here, Stalwart's defaultHostname and the A record move together or not at all:
       # docs/mail/hostname-cutover-constraint.md.
       - JMAP_SERVER_URL=https://mail.blueprintdigital.my

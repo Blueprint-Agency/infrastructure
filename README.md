@@ -13,7 +13,7 @@ push to main (vps/**) → GHA detect → matrix deploy → rsync compose + merge
       ┌──────────────┬──────────────┬─────┴────────┬──────────────┐
       ▼              ▼              ▼              ▼              ▼
  vps1-staging    vps2-prod     vps3-prod       bpvps1         bpvps2
-   (Teeko)        (Teeko)       (Teeko)       (Kaiteki)      (Booking)
+   (Teeko)        (Teeko)       (Teeko)    (Kaiteki + mail)  (Booking)
 ```
 
 - **Reverse proxy**: Traefik on every host (Let's Encrypt via Cloudflare DNS-01)

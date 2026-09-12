@@ -36,6 +36,10 @@ as "the new hostname works now" is the mistake this document exists to prevent.
 
 ## Why it fails silently rather than loudly
 
+*(Written before the cutover; the tense is that day's. bpvps2's mail stack was deleted in #12
+on 2026-09-12, so this exact trap no longer exists — but the mechanism does, for any future
+name that resolves to any other machine serving TLS.)*
+
 `mail.blueprintdigital.my` is not a dead name. It resolves to `187.127.207.82` (bpvps2), which
 runs its own Stalwart and its own Bulwark, and answers `/jmap/session` with **HTTP 200** under a
 **valid certificate** whose SANs are `mail.blueprintdigital.my` and `webmail.blueprintdigital.my`.

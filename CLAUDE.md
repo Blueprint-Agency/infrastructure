@@ -76,8 +76,8 @@ compose` is still SSH.
 | `bp-vps1-staging` | Staging | 2 vCPU / 8GB / 100GB |
 | `bp-vps2-prod` | Production | 4 vCPU / 16GB / 200GB |
 | `bp-vps3-prod` | Production | 4 vCPU / 16GB / 200GB |
-| `bp-bpvps1` | Kaiteki (legacy + revamp) | 187.127.122.41 |
-| `bp-bpvps2` | Booking-system | 187.127.207.82 |
+| `bp-bpvps1` | Kaiteki (legacy + revamp) + **the mail platform** (all three domains) | 187.127.122.41 |
+| `bp-bpvps2` | Booking-system only — no mail since 2026-09-12 (#12) | 187.127.207.82 |
 
 SSH key: `~/.ssh/infra_ed25519`. All hosts log in as **`deploy`**, not root — `deploy` is in the `docker` group and owns `/root/stacks`. Hosts defined in `~/.ssh/config`.
 
@@ -99,10 +99,18 @@ host whose on-host dirs differ from the repo: a single `booking` stack fans out 
 `booking-staging` + `booking-prod` per `vps/hosts.json`.
 
 > `docs/running-services.md` is a **2026-07-21 snapshot**, refreshed for bpvps2 on 2026-08-31
-> (booking moved off VPS3 and now has its own section). Everything else in it is still that
-> July snapshot — treat the other hosts as history, not as inventory.
+> (booking moved off VPS3 and now has its own section) and for both Blueprint hosts on
+> 2026-09-12 (mail consolidated onto bpvps1). Everything else in it is still that July
+> snapshot — treat the Teeko hosts as history, not as inventory.
 
-Four things the compose files will not tell you — all of them "do not prune":
+Five things the compose files will not tell you — all of them "do not prune":
+
+> **Mail is ONE platform on bpvps1** — one Stalwart, one Bulwark, one `unbound`, serving
+> `kaiteki.my`, `blueprintdigital.my` and `reservetoday.app`. A new mail domain is a domain
+> *added* to that instance, never a second stack or host: the `onboard-mail-domain` skill
+> (`.claude/skills/onboard-mail-domain/SKILL.md`) is the checklist. bpvps2's copy of the stack
+> was deleted on 2026-09-12 (#12) with its 52 MB of test mail; nothing there listens on a mail
+> port any more. The three containers there are the whole stack — `unbound` is not an orphan.
 
 > The `n8n` stack on VPS3 carries **three** containers, not two: `n8n-prod`, `n8n-db`, and
 > `waba-db` (service `db-waba`, `postgres:alpine`). `waba-db` is a separate database that happens to
@@ -360,7 +368,8 @@ before against an after. Snapshots live in `docs/mail/`.
 > **Since 2026-09-12 (#9) it is `mail.blueprintdigital.my`** — the canonical mail host and the
 > MX target for every domain except kaiteki.my, whose MX stays `mail.kaiteki.my` — the same box under its old name, kept for
 > configured IMAP clients. `mail.`/`webmail.blueprintdigital.my` A records point at bpvps1;
-> bpvps2's mail stack still runs but nothing resolves to it (deletion is #12).
+> bpvps2's mail stack was deleted on 2026-09-12 (#12), so there is no longer a second
+> Stalwart anywhere for that name to land on by mistake.
 
 > **bpvps1's `stalwart` and `traefik` stacks are root-owned, so `deploy` cannot run
 > `docker compose` in them directly** — the `.env` read fails with `permission denied`. Run

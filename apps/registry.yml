@@ -1,7 +1,7 @@
 # App Registry
 # Central mapping of all apps to their repos, VPS targets, and configurations.
 # Update this file whenever adding/removing an app.
-# Last updated: 2026-03-29
+# Last updated: 2026-09-12 (mail section added; bpvps2 mail stack removed, #12)
 
 apps:
   - name: teeko-site-fe
@@ -189,7 +189,47 @@ tools:
       MASTERPASS (GATEWAY_MASTERPASS secret, shared by all three), then add DB connections
       in the UI by in-network hostname."
 
+mail:
+  # ONE platform, not one entry per domain. A mail domain is a row in Stalwart's store
+  # (x:Domain/set), never its own stack, container or host — the same shape as booking's
+  # tenants. Adding one is the `onboard-mail-domain` skill, not an edit to this file beyond
+  # the `domains` list below.
+  - name: stalwart
+    image: stalwartlabs/stalwart:v0.16.21   # pinned; never :latest (see stack README)
+    stack: stalwart
+    vps:
+      production: bpvps1
+    domains:
+      - kaiteki.my            # MX mail.kaiteki.my — the same box under its older name, kept for configured IMAP clients
+      - blueprintdigital.my   # MX mail.blueprintdigital.my — the canonical host, Stalwart's default hostname
+      - reservetoday.app      # MX mail.blueprintdigital.my — no vanity host; SPF ~all / p=quarantine because Clerk also sends
+    domain:
+      production: mail.blueprintdigital.my   # JMAP + self-service; mail.kaiteki.my is an alias of the same server
+    db: rocksdb               # in the stalwart-data volume, /opt/stalwart/data
+    notes: "Mail server for every Blueprint-side domain: SMTP/IMAP/POP3/JMAP/ManageSieve + DKIM +
+      spam. Mail ports bind on the host; the JMAP/web side goes through Traefik's file provider
+      with one acme.sh certificate (Cloudflare DNS-01, KAITEKI_CF_DNS_API_TOKEN) covering all
+      mail./webmail. names — renew-cert.sh owns the name list. Needs the co-located `unbound`
+      container for DNSBLs. No admin UI on 0.16.x: configuration is the JMAP `x:` API, shapes in
+      vps/bpvps1/stacks/stalwart/README.md. Consolidated here 2026-09-12 (#5): the second
+      instance on bpvps2 that served blueprintdigital.my from 2026-08-06 was deleted in #12."
+
+  - name: bulwark
+    image: ghcr.io/bulwarkmail/webmail:latest
+    stack: stalwart
+    vps:
+      production: bpvps1
+    port: 3000
+    domain:
+      production: webmail.blueprintdigital.my   # + webmail.kaiteki.my, same container, per-hostname branding
+    db: null                  # stores no mail; JMAP client of stalwart
+    notes: "Webmail for every domain on the platform, one container behind many hostnames.
+      DOMAIN_BRANDING in the compose picks the brand per request Host (#11); a domain without
+      its own webmail hostname (reservetoday.app) signs in at webmail.blueprintdigital.my.
+      SESSION_SECRET must never rotate — it encrypts every user's saved settings."
+
 # Already removed (migration complete):
+# - stalwart / unbound / bulwark on bpvps2 (2026-09-12, #12 — mail consolidated onto bpvps1)
 # - pgadmin (replaced by drizzle-gateway on all 3 Teeko VPS)
 # - portainer / portainer_agent (replaced by Claude Code + MCP)
 # - teeko-webapp-fe / -be / -db (staging webapp retired; volume teeko-webapp-db kept on VPS1)
