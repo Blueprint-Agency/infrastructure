@@ -23,7 +23,7 @@ messages. Plus a `totals` block.
 
 ## Why this is JMAP and not the admin UI
 
-Stalwart v0.16.16 has **no admin UI that lists accounts**. The REST `/api/principal` of older
+Stalwart 0.16.x (checked on `.16` and `.21`) has **no admin UI that lists accounts**. The REST `/api/principal` of older
 versions is gone, `/account/` is a self-service page, and `--console` is a raw key-value
 debugger. Tickets that say "read it out of the admin UI" are describing something that does
 not exist here.

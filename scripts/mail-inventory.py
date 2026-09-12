@@ -16,7 +16,7 @@ Read-only. It issues JMAP reads and nothing else.
 ---------------------------------------------------------------------------------------
 WHY THIS EXISTS, AND WHY IT IS JMAP
 
-Stalwart v0.16.16 has no admin UI. The REST `/api/principal` of older versions is gone and
+Stalwart 0.16.x (checked on .16 and .21) has no admin UI. The REST `/api/principal` of older versions is gone and
 `/account/` is a self-service page, so "read it out of the admin UI" is not an available
 answer on this platform. Its management API is JMAP with an `x:` prefix (`x:Account/get`,
 see the stalwart stack README) -- this script predates that discovery and uses the RFC

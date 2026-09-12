@@ -85,7 +85,7 @@ Removing any one breaks that URL's auth. Nothing here is redundant.
 | booking-db-staging | postgres:16-alpine | — |
 | booking-be-prod | blueprintagency/booking-be:latest | api.reservetoday.app |
 | booking-db-prod | postgres:16-alpine | — |
-| stalwart | stalwartlabs/stalwart:v0.16.16 | mail ports |
+| stalwart | stalwartlabs/stalwart:v0.16.21 | mail ports |
 | unbound | klutchell/unbound:latest | — (resolver for stalwart) |
 | bulwark | ghcr.io/bulwarkmail/webmail:latest | — (no Host label) |
 

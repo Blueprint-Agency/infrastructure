@@ -338,7 +338,9 @@ never a new script. The parsing half is `scripts/lib/mail-checks.sh` and is cove
 account, its message count and its bytes, so a migration can be proved invisible by diffing a
 before against an after. Snapshots live in `docs/mail/`.
 
-> ⚠️ **Stalwart v0.16.16 has no admin UI, and its management API is JMAP with an `x:` prefix.**
+> ⚠️ **Stalwart 0.16.x has no admin UI, and its management API is JMAP with an `x:` prefix.**
+> (Pinned at `v0.16.21` since 2026-09-12, #13. The bump from `.16` was canaried on bpvps2 and
+> changed nothing about this — do not bump again hoping for a UI.)
 > The REST `/api/*` management paths of older versions all 404, and `/account/` is a
 > self-service page — a ticket that says "set it in the admin UI" is describing a screen this
 > build does not have. The real surface is `x:Domain/set`, `x:Account/set`,

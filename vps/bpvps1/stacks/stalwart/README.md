@@ -96,9 +96,15 @@ PTR (Hostinger hPanel): `187.127.122.41` → **`mail.kaiteki.my`** (FCrDNS / del
 > sends, or DMARC will reject it. Watch the `rua` reports at `admin@kaiteki.my` for spoof attempts.
 
 ## ⚠️ Gotchas / landmines
-- **Stalwart is version-pinned** (`v0.16.16`), not `:latest` — an unattended `up -d` must not
-  cross a major (1.0) with a data migration. Bump the tag deliberately; `0.16.x → 0.16.y` is a
-  plain binary swap per upstream. Back up the `stalwart-data` volume first (see Ops).
+- **Stalwart is version-pinned** (`v0.16.21` since 2026-09-12, #13; was `v0.16.16`), not
+  `:latest` — an unattended `up -d` must not cross a major (1.0) with a data migration. Bump
+  the tag deliberately; `0.16.x → 0.16.y` is a plain binary swap per upstream, and the
+  `.16 → .21` bump was exactly that: no store migration, every setting intact, same management
+  surface. Back up the `stalwart-data` volume first (see Ops).
+  > **Do not expect a bump within 0.16.x to add an admin UI.** #13 was opened on the theory
+  > that `.16` lacked a management surface; it was canaried on bpvps2 and the surface on
+  > `.21` is byte-for-byte the same story — `/api/*` 404, `/manage/` 404, `/admin/` is the
+  > self-service Portal. The management surface IS the JMAP `x:` API below, on every 0.16.x.
 - **Only 25/465/993/995/4190 actually serve.** The compose also publishes 587/143/110 but
   Stalwart has **no listener** on them (implicit-TLS-only setup), so those three are dead
   ports — a connection is accepted by docker-proxy and then dropped. Add the listener in the
@@ -175,13 +181,24 @@ docker compose ps
 docker compose up -d            # safe to recreate (config.json is mounted)
 ./renew-cert.sh                 # manual cert renew (also daily via cron)
 
-# Version bump — back up the 7GB RocksDB store first (stop for a consistent copy):
-docker compose stop
+# Version bump — back up the 8GB RocksDB store first (stop for a consistent copy):
+docker compose stop stalwart
 docker run --rm -v stalwart_stalwart-data:/d:ro -v /home/deploy/backups:/b \
-  alpine tar cf /b/stalwart-data-$(date +%Y%m%d).tar -C /d .
+  alpine tar cf /b/stalwart-data-$(date +%Y%m%d-%H%M).tar -C /d .
 # ...edit the image tag, then:
-docker compose pull && docker compose up -d
+docker compose pull stalwart && docker compose up -d stalwart
 ```
+> On this host `docker compose` has to run from a `docker:cli` container (root-owned stack
+> dir, see below). Stopping only the `stalwart` service keeps `unbound` and `bulwark` up.
+> The `.16 → .21` bump on 2026-09-12 (#13) took **22 s** of mail downtime (14:22:39 →
+> 14:23:01 UTC), almost all of it the 7.8 GB backup tar; pre-pull the image so the swap
+> itself is a container recreate. Canary any future bump on a non-production
+> instance first — bpvps2 played that role for #13 and is gone after #12.
+>
+> **Rollback** is the reverse: put the old tag back in the compose, `up -d stalwart`. The
+> store is forward-compatible within 0.16.x, so the backup tar is only for a *damaged* store,
+> restored with the "Proving a backup is restorable" recipe below pointed at the live volume
+> (stop Stalwart first).
 > `deploy` has no passwordless sudo and `/root/stacks/stalwart` is root-owned — to update a
 > file there, pipe it through a container:
 > `cat file | ssh bp-bpvps1 "docker run --rm -i -v /root/stacks/stalwart:/s alpine sh -c 'cat > /s/file'"`
@@ -201,7 +218,7 @@ docker run --rm --entrypoint /usr/local/bin/stalwart \
   -v stalwart-restoretest:/opt/stalwart \
   -v /root/stacks/stalwart/config.json:/etc/stalwart/config.json:ro \
   -v /tmp/stexport:/out \
-  stalwartlabs/stalwart:v0.16.16 --export /out --config /etc/stalwart/config.json
+  stalwartlabs/stalwart:v0.16.21 --export /out --config /etc/stalwart/config.json
 rm -rf /tmp/stexport; docker volume rm stalwart-restoretest
 ```
 
@@ -215,7 +232,7 @@ rm -rf /tmp/stexport; docker volume rm stalwart-restoretest
 
 ### Listing accounts
 
-There is **no admin UI that lists accounts** on v0.16.16 — `/account/` is a self-service page,
+There is **no admin UI that lists accounts** on 0.16.x (checked on `.16` and `.21`) — `/account/` is a self-service page,
 and the REST `/api/principal` of older versions is gone. Any instruction to "read it out of
 the admin UI" is describing something this build does not have.
 
@@ -238,7 +255,8 @@ longer ships: `/admin/` and `/account/` serve the same self-service "Portal" bun
 **The methods are `x:<Object>/{get,set,query}`**, and `using` must include
 `urn:stalwart:jmap`. That prefix is the whole trick — `Domain/get` is `unknownMethod`,
 `x:Domain/get` works. (Source: `crates/jmap-proto/src/request/method.rs` at tag v0.16.16.
-Confirmed live here 2026-09-12.) Basic auth as any account with the **Admin** role, or as the
+Confirmed live here 2026-09-12 on `.16`, and again on `.21` after #13 — same methods, same
+shapes, same answers.) Basic auth as any account with the **Admin** role, or as the
 env recovery admin (`STALWART_RECOVERY_ADMIN`) over loopback `:8090`.
 
 ```bash
@@ -272,8 +290,10 @@ are objects keyed `"0"`, `"1"`, …. `query` filters are flat (`{"filter":{"name
 and only indexed properties filter. There is no `changes`/`queryChanges` for `x:` objects.
 
 > The full property reference is the server's own schema:
-> `GET /api/schema/<hash>` with Basic auth, hash at `resources/schema/schema.json.sha256` in the
-> source tree for the running tag. Upstream also publishes `stalwart-cli`
+> `GET /api/schema` with Basic auth **302s to `/api/schema/<hash>`** for the running build
+> (seen on `.21`), so `curl -sL --compressed -u admin:… http://127.0.0.1:8090/api/schema` is
+> the whole lookup (~940 KB of JSON; it comes back gzip-encoded whether or not you asked, hence
+> `--compressed`) — no need for `resources/schema/schema.json.sha256` in the source tree. Upstream also publishes `stalwart-cli`
 > (`github.com/stalwartlabs/cli`, a separate repo — it is **not** a release asset of the server),
 > which speaks exactly this protocol and derives its commands from that schema. Not yet used here.
 
