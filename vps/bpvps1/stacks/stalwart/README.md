@@ -101,6 +101,24 @@ PTR (Hostinger hPanel): `187.127.122.41` → **`mail.kaiteki.my`** (FCrDNS / del
   Re-test with: `docker run --rm --network stalwart_mailnet --dns 172.16.3.53 alpine nslookup
   2.0.0.127.zen.spamhaus.org` → must return `127.0.0.2/4/10`.
 
+## Verifying it works
+`../../../../scripts/verify-mail.sh kaiteki.my admin@kaiteki.my` (from the repo root:
+`./scripts/verify-mail.sh kaiteki.my`) checks this stack end to end from outside — MX/SPF/DKIM/DMARC,
+the cert on **both** 443 and 465, the webmail and its branding, the CORS preflight, a real JMAP
+login, and both delivery legs. Run it before and after any change here; it changes nothing.
+
+> The inbound leg runs over SSH from `bp-vps3-prod` (`--via`), because home ISPs block outbound 25
+> and a laptop probe would read BLOCKED on a healthy server. The outbound leg sends through 465 and
+> waits for `check-auth@verifier.port25.com` to report the SPF/DKIM it observed, reading the reply
+> back over JMAP — the estate has an instance that has never written a log line, so nothing here is
+> proven by grepping our own logs. Mailbox passwords come from `.env` as `MAIL_PASSWORD_*`.
+
+> ⚠️ **Traefik and Stalwart can drift onto different copies of the same cert.** Verified 2026-09-12:
+> port 443 served the **28 Jun** cert while port 465 served the **29 Aug** renewal — same names, same
+> files, different serials. `renew-cert.sh` restarts Stalwart but nothing makes Traefik re-read the
+> file, so the web UIs keep the old cert until Traefik is restarted, and expire on the old date.
+> That is why `verify-mail.sh` checks 443 and 465 separately rather than assuming one cert.
+
 ## Ops
 ```bash
 cd /root/stacks/stalwart

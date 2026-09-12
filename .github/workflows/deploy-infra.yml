@@ -69,6 +69,11 @@ jobs:
       - name: Self-check the template renderer
         run: python3 vps/shared/test_render_ci.py
 
+      # Covers only the pure parsing half of verify-mail.sh -- no DNS, SMTP or TLS is
+      # touched, so this is safe to run on every deploy.
+      - name: Self-check the mail verification checks
+        run: bash scripts/test_verify_mail.sh
+
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
         with:

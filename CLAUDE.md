@@ -305,3 +305,22 @@ Contents either way: `[Service]` + `Environment="DOCKER_MIN_API_VERSION=1.24"`, 
 
 `vps/shared/` holds the CI helpers (see the `provision` skill); `scripts/backup.sh <bp-alias>` tars
 every named volume on that host into `/home/deploy/backups/`.
+
+`scripts/verify-mail.sh <domain> [account…]` is the **one verification seam for mail** — DNS, TLS,
+webmail, CORS, JMAP login and both delivery legs for a domain, in one exit code. Per-domain
+expectations are `scripts/verify-mail.d/<domain>.conf`, so a new mail domain is a new config file,
+never a new script. The parsing half is `scripts/lib/mail-checks.sh` and is covered by
+`scripts/test_verify_mail.sh`, which runs as a CI step next to `test_render_ci.py`.
+
+> ⚠️ **The inbound check must run from another host, and does so over SSH** (`--via`, default
+> `bp-vps3-prod`). Home ISPs block outbound 25, so a laptop-direct probe reads BLOCKED on a
+> perfectly healthy server — the same trap the firewall notes warn about. It refuses to relay
+> through the mail host itself by comparing **addresses**, not names: `--via bp-bpvps1` is the
+> mail host, and no string comparison against `mail.kaiteki.my` would ever catch it.
+
+> Exit status is `0` fully green, `1` a failure, `2` the run could not start, and **`3` green but
+> something was skipped** — so `--skip` can never be mistaken for a passing run.
+
+> Mailbox passwords come from `.env` as `MAIL_PASSWORD_<ACCOUNT>` (uppercased, non-alphanumerics
+> to `_`), or an interactive prompt. Accounts are **not** enumerated — this build's management API
+> does not list principals to scripts, so the accounts to test are arguments.
