@@ -146,6 +146,17 @@ ok  'branding empty field fails'      1 branding_check "$CFG" 'loginCompanyName'
 ok  'branding absent field fails'     1 branding_check "$CFG" 'nosuchField' 'anything'
 ok  'branding stock appName fails'    1 branding_check '{"appName":"Bulwark"}' 'appName' 'Bulwark'
 ok  'branding empty body fails'       1 branding_check '' 'appName' 'Kaiteki Mail'
+# "Version hidden" is a boolean in the response, not a string: `"loginShowVersion":false`.
+# A string-only reader reports it absent, and the check would fail on a correctly branded
+# instance -- so booleans are read too, and compared as the literal words true/false.
+CFG_BOOL='{"appName":"Blueprint Mail","loginShowVersion":false,"loginShowTotp":true}'
+ok  'branding boolean false matches'  0 branding_check "$CFG_BOOL" 'loginShowVersion' 'false'
+ok  'branding boolean true matches'   0 branding_check "$CFG_BOOL" 'loginShowTotp' 'true'
+ok  'branding boolean mismatch fails' 1 branding_check "$CFG_BOOL" 'loginShowVersion' 'true'
+# The stock logos are the other way an unbranded instance answers 200: every URL is set,
+# just to Bulwark's own files. A config that "expects" a stock path must still fail.
+ok  'branding stock logo fails'       1 branding_check "$CFG" 'faviconUrl' '/branding/Bulwark_Favicon.svg'
+ok  'branding own logo passes'        0 branding_check '{"loginLogoDarkUrl":"/branding/blueprint/login-dark.svg"}' 'loginLogoDarkUrl' '/branding/blueprint/login-dark.svg'
 
 # --------------------------------------------------------------------------------------
 # port25_verdict <report-text> <domain> -- outbound auth AND DMARC alignment
@@ -204,6 +215,33 @@ ok 'port25 truncated report fails' 1 port25_verdict 'Summary of Results' 'kaitek
 # Subdomain alignment is relaxed-mode OK for DMARC, and we accept it.
 SUBDOMAIN="$(mutate 's/d=kaiteki\.my/d=mail.kaiteki.my/')"
 ok 'port25 subdomain dkim is aligned' 0 port25_verdict "$SUBDOMAIN" 'kaiteki.my'
+
+# --------------------------------------------------------------------------------------
+# The expectations files themselves. verify-mail.sh dies at startup on a blank key, but
+# only for the one domain being run -- a conf for a domain nobody has run yet could sit
+# broken in the repo until the cutover it exists for. So every conf is checked here, and
+# every domain that is LIVE on the platform must have one (reservetoday.app joins the
+# list when #10 publishes its mail records).
+# --------------------------------------------------------------------------------------
+CONF_KEYS='MAIL_HOST WEBMAIL_HOST EXPECT_MX EXPECT_JMAP_HOST EXPECT_SPF_ALL EXPECT_DMARC_POLICY EXPECT_DMARC_RUA DKIM_SELECTORS BRANDING_EXPECT DEFAULT_ACCOUNTS INVENTORY_ACCOUNT'
+
+# conf_complete <file> -- every required key set and non-blank, in a subshell so the confs
+# cannot leak into each other.
+conf_complete() (
+  # shellcheck disable=SC1090
+  source "$1" || exit 1
+  for key in $CONF_KEYS; do
+    value="${!key-}"
+    [[ -n "${value//[[:space:]]/}" ]] || { echo "$1 sets $key to an empty value"; exit 1; }
+  done
+)
+
+for conf in "$HERE"/verify-mail.d/*.conf; do
+  ok "conf complete: $(basename "$conf")" 0 conf_complete "$conf"
+done
+for domain in kaiteki.my blueprintdigital.my; do
+  ok "conf exists for $domain" 0 test -f "$HERE/verify-mail.d/$domain.conf"
+done
 
 # --------------------------------------------------------------------------------------
 printf '\n%s\n' "----------------------------------------"

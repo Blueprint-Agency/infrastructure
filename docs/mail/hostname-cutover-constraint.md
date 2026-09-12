@@ -5,6 +5,12 @@ while that name still resolves to bpvps2 would break Kaiteki webmail for every u
 and without a certificate warning. The hostname move and the A-record move are one step, not
 two. Verified against the live servers on 2026-09-12.
 
+> **Done, 2026-09-12 (#9).** The cutover below was executed in this order the same day:
+> the three bpvps2 mailboxes re-created on bpvps1 first → A records + SPF + DKIM at
+> 13:58:55Z → hostname (14:04:18Z) and Bulwark repoint (14:04:50Z) after the 300 s TTL had
+> run out. The rule is kept
+> here as written because it applies to any future hostname change, not just that one.
+
 ## The two facts that combine badly
 
 **1. Stalwart builds its JMAP session URLs from the configured default hostname and ignores
@@ -45,8 +51,9 @@ The A record and the default hostname move **together**, and neither moves befor
 `blueprintdigital.my` mailboxes exist on bpvps1. In order:
 
 0. Every mailbox that bpvps2's Stalwart holds for `blueprintdigital.my` is created on bpvps1
-   (same addresses, passwords re-issued). As of 2026-09-12 bpvps1 holds exactly one:
-   `admin@blueprintdigital.my`.
+   (same addresses, passwords re-issued — the store holds hashes, so they cannot be carried
+   over). bpvps2 held `chriskke@`, `danielchua@` and `yuchen@`; bpvps1 held only `admin@`
+   until #9 created the other three (ids `u`, `v`, `w`).
 1. `mail.blueprintdigital.my` and `webmail.blueprintdigital.my` A → `187.127.122.41` (bpvps1),
    DNS-only. bpvps1's certificate already carries both names and the Traefik routers already
    exist, so the names answer the moment the record lands.

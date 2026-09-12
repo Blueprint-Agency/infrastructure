@@ -48,14 +48,15 @@ services:
       # container resolves the Stalwart JMAP host to Traefik and gets a valid cert;
       # Traefik then proxies to stalwart:8080.
       #
-      # mail.kaiteki.my is the live one: it is what Bulwark's JMAP_SERVER_URL points at and
-      # what Stalwart advertises in its JMAP session.
+      # mail.blueprintdigital.my is the live one since #9 (2026-09-12): it is what Bulwark's
+      # JMAP_SERVER_URL points at and what Stalwart advertises in its JMAP session.
+      # mail.kaiteki.my is the same box under its old name, kept for configured clients.
       #
-      # mail.blueprintdigital.my is staged ahead of the cutover. Publicly it still resolves
-      # to bpvps2, so this alias only changes what the BULWARK CONTAINER resolves — it does
-      # not make the name usable by browsers, because Bulwark serves its JMAP host to the
-      # browser in /api/config and the browser uses public DNS. Do not read this alias as
-      # "the new hostname works now"; it is half of a move whose other half is the A record.
+      # An alias only changes what the BULWARK CONTAINER resolves. It does not make a name
+      # usable by browsers, because Bulwark serves its JMAP host to the browser in
+      # /api/config and the browser uses public DNS. Adding a name here is half of a move
+      # whose other half is the A record — docs/mail/hostname-cutover-constraint.md.
+      # Aliases only apply on container (re)create: `compose up -d traefik` after editing.
       mailnet:
         aliases:
           - mail.blueprintdigital.my

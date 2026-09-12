@@ -1,15 +1,15 @@
 # Traefik dynamic config — serves the shared LE cert (acme.sh DNS-01) and routes the mail
 # web UIs for every domain this Stalwart is to hold.
-#   mail.kaiteki.my             -> Stalwart admin + JMAP endpoint (stalwart:8080)  [live]
-#   webmail.kaiteki.my          -> Bulwark webmail (bulwark:3000)                  [live]
-#   mail.blueprintdigital.my    -> the same Stalwart   } routed and certificated here, but
-#   webmail.blueprintdigital.my -> the same Bulwark    } their A records still point at
-#                                                      } bpvps2, so nothing reaches these
-#                                                      } yet. Staged, not live.
+#   mail.blueprintdigital.my    -> Stalwart JMAP endpoint (stalwart:8080) — the CANONICAL
+#                                  mail host since #9 (2026-09-12): Stalwart's default
+#                                  hostname and the MX target for every domain but kaiteki.my
+#   mail.kaiteki.my             -> the same Stalwart; alias kept for configured IMAP clients
+#   webmail.blueprintdigital.my -> Bulwark webmail (bulwark:3000)
+#   webmail.kaiteki.my          -> the same Bulwark
 #
-# Routing a name Traefik does not yet receive traffic for costs nothing and removes a step
-# from the cutover: when the A records move, these hosts answer immediately on a
-# certificate that already covers them.
+# All four A records point here (187.127.122.41). Routing a name before its A record moved
+# cost nothing and removed a step from the cutover: the hosts answered the moment the
+# record landed, on a certificate that already covered them.
 #
 # One Stalwart and one Bulwark serve all of these. A second container per domain would
 # double the RAM, the upgrades and the config drift for nothing: Bulwark stores no mail,

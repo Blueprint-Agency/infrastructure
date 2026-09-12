@@ -357,6 +357,17 @@ before against an after. Snapshots live in `docs/mail/`.
 > URLs come from it and ignore the request `Host`, and Bulwark hands its JMAP host to the
 > *browser*. Set it to a name whose A record is another machine and every webmail user is sent
 > there, under a valid cert, with no error. `docs/mail/hostname-cutover-constraint.md`.
+> **Since 2026-09-12 (#9) it is `mail.blueprintdigital.my`** — the canonical mail host and the
+> MX target for every domain except kaiteki.my, whose MX stays `mail.kaiteki.my` — the same box under its old name, kept for
+> configured IMAP clients. `mail.`/`webmail.blueprintdigital.my` A records point at bpvps1;
+> bpvps2's mail stack still runs but nothing resolves to it (deletion is #12).
+
+> **bpvps1's `stalwart` and `traefik` stacks are root-owned, so `deploy` cannot run
+> `docker compose` in them directly** — the `.env` read fails with `permission denied`. Run
+> compose from a container instead: `docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
+> -v /root/stacks/<stack>:/root/stacks/<stack> -w /root/stacks/<stack> docker:cli compose up -d
+> <service>` (same absolute path on both sides, so the compose file's relative bind mounts
+> resolve). File writes go through the `alpine` pipe in the stalwart README.
 
 > ⚠️ **Traefik v3.3 `Host()` takes ONE name.** `Host(`a`, `b`)` passes YAML and the file
 > provider, then fails at router build with "unexpected number of parameters", and the router

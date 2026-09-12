@@ -238,7 +238,7 @@ CONF="$CONF_DIR/$DOMAIN.conf"
 # shellcheck disable=SC1090
 source "$CONF"
 
-for key in MAIL_HOST WEBMAIL_HOST EXPECT_MX EXPECT_SPF_ALL EXPECT_DMARC_POLICY \
+for key in MAIL_HOST WEBMAIL_HOST EXPECT_MX EXPECT_JMAP_HOST EXPECT_SPF_ALL EXPECT_DMARC_POLICY \
            EXPECT_DMARC_RUA DKIM_SELECTORS BRANDING_EXPECT DEFAULT_ACCOUNTS; do
   value="${!key-}"
   [[ -n "${value//[[:space:]]/}" ]] || die "$CONF sets $key to an empty value -- a blank expectation is not a check"
@@ -524,11 +524,16 @@ jmap_context() {
     return 1
   fi
   # An absolute apiUrl on the wrong host is the specific breakage that takes the webmail
-  # down when Stalwart's Default Hostname is wrong, so it is asserted rather than assumed.
-  if [[ "$api_url" == http* && "$api_url" != "https://$MAIL_HOST"* ]]; then
-    echo "ERR session advertises apiUrl '$api_url', which is not on $MAIL_HOST -- the webmail will break"
+  # down when Stalwart's default hostname is wrong, so it is asserted rather than assumed.
+  # It is compared against EXPECT_JMAP_HOST, not MAIL_HOST: one Stalwart serves every
+  # domain and advertises ONE hostname for all of them, so a domain whose MX name is an
+  # alias of the platform host (kaiteki.my) is told to use the platform host, correctly.
+  if [[ "$api_url" == http* && "$api_url" != "https://$EXPECT_JMAP_HOST/"* ]]; then
+    echo "ERR session advertises apiUrl '$api_url', which is not on $EXPECT_JMAP_HOST -- the webmail will break"
     return 1
   fi
+  # A RELATIVE apiUrl is relative to the host we asked, so MAIL_HOST is right here even
+  # though the absolute case above is judged against EXPECT_JMAP_HOST.
   [[ "$api_url" == http* ]] || api_url="https://$MAIL_HOST$api_url"
   printf 'OK %s %s\n' "$api_url" "$account_id"
 }

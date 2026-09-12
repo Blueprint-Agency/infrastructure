@@ -1,15 +1,22 @@
-# Stalwart + Bulwark — self-hosted email for `kaiteki.my` (BPVPS1)
+# Stalwart + Bulwark — the multi-domain mail platform (BPVPS1)
 
-**Stalwart** (Rust mail server, v1.0) handles SMTP/IMAP/POP3/JMAP/ManageSieve + DKIM +
-spam; **Bulwark** is a modern JMAP webmail (HTML compose, themes, calendar, contacts,
-files, built-in admin dashboard). Replaced the earlier Roundcube webmail; the mail host
-was renamed `email.kaiteki.my` → `mail.kaiteki.my`.
+**Stalwart** (Rust mail server) handles SMTP/IMAP/POP3/JMAP/ManageSieve + DKIM + spam;
+**Bulwark** is a modern JMAP webmail (HTML compose, themes, calendar, contacts, files,
+built-in admin dashboard). One Stalwart and one Bulwark serve **every** domain: `kaiteki.my`,
+`blueprintdigital.my`, `reservetoday.app`. Replaced the earlier Roundcube webmail; the
+Kaiteki mail host was renamed `email.kaiteki.my` → `mail.kaiteki.my`.
+
+**The canonical mail host is `mail.blueprintdigital.my`** (since the #9 cutover, 2026-09-12):
+it is Stalwart's default hostname, what Bulwark points at, and the MX target every new
+domain uses. `mail.kaiteki.my` is the same box under its older name, kept alive so
+already-configured Kaiteki IMAP clients never need touching.
 
 | | URL | Login |
 |---|---|---|
-| Stalwart admin | `https://mail.kaiteki.my` (→ `/account`) | `admin@kaiteki.my` |
-| Webmail | `https://webmail.kaiteki.my` | mailbox creds (e.g. `admin@kaiteki.my`) |
+| Stalwart self-service | `https://mail.blueprintdigital.my` (→ `/account`) | any mailbox |
+| Webmail | `https://webmail.blueprintdigital.my` / `https://webmail.kaiteki.my` | mailbox creds — any domain's mailbox at either hostname |
 | Bulwark admin dashboard | `https://webmail.kaiteki.my/admin` | `ADMIN_PASSWORD` (stack `.env`, `BULWARK_ADMIN_PASSWORD`) |
+| Management API | JMAP `x:` methods, see "Configuring this build" | `admin@blueprintdigital.my` (Admin role) |
 
 Stack dir on VPS: `/root/stacks/stalwart/`. Mail data in the `stalwart-data` volume
 (RocksDB at `/opt/stalwart/data`). Co-hosted behind the existing Traefik.
@@ -18,14 +25,17 @@ Stack dir on VPS: `/root/stacks/stalwart/`. Mail data in the `stalwart-data` vol
 - **Mail ports** (25/465/587/993/143/110/995/4190) bind directly on the host.
 - **Web UIs** go through Traefik: `mail.` → `stalwart:8080`, `webmail.` → `bulwark:3000`,
   over the external `stalwart_mailnet` network. See `../traefik/dynamic/stalwart.yml`.
-- **Bulwark → Stalwart is JMAP over HTTPS.** Bulwark uses `JMAP_SERVER_URL=https://mail.kaiteki.my`
-  and follows the **absolute** URLs Stalwart returns in its JMAP session. So:
-  - Stalwart's **Default Hostname must be `mail.kaiteki.my`** (admin UI → Settings → Network),
-    otherwise the session advertises the wrong host and the webmail breaks.
-  - `mail.kaiteki.my` is a **network alias on Traefik** (`../traefik/docker-compose.yml`) so the
-    Bulwark container resolves it internally to Traefik → valid cert → `stalwart:8080`.
+- **Bulwark → Stalwart is JMAP over HTTPS.** Bulwark uses
+  `JMAP_SERVER_URL=https://mail.blueprintdigital.my` and follows the **absolute** URLs
+  Stalwart returns in its JMAP session. So:
+  - Stalwart's **default hostname must be `mail.blueprintdigital.my`** (`x:SystemSettings`,
+    see "Configuring this build"), otherwise the session advertises the wrong host and the
+    webmail breaks. And that name's **public A record must be this server** — see the
+    hostname landmine below.
+  - Both `mail.` names are **network aliases on Traefik** (`../traefik/docker-compose.yml`) so
+    the Bulwark container resolves them internally to Traefik → valid cert → `stalwart:8080`.
   - The browser also calls JMAP **cross-origin** (`webmail.` → `mail.`, incl. `/.well-known/jmap`),
-    so **Traefik adds CORS** for the mail host (specific origin `https://webmail.kaiteki.my` +
+    so **Traefik adds CORS** for the mail host (an allow-list of every webmail origin +
     `Allow-Credentials: true`, and it answers preflight) — see the `mail-cors` middleware in
     `../traefik/dynamic/stalwart.yml`. Stalwart's own "Permissive CORS" is left **OFF**: it only
     emits `*` (which browsers reject for credentialed / "Remember me" requests) and it doesn't
@@ -77,16 +87,34 @@ zones, which is the whole reason a single certificate can span them. Cert lands 
 > every night and only surfaces on the one night the cert actually had to be renewed. The
 > script now refuses to start on an empty token.
 
-## DNS (zone `kaiteki.my`, separate CF account — `KAITEKI_CF_DNS_API_TOKEN`, zone `6378ec…`)
+## DNS (both zones in the Blueprint CF account — `KAITEKI_CF_DNS_API_TOKEN` covers both)
+
+Zone `kaiteki.my` (`6378ec…`):
+
 | Record | Name | Value |
 |--------|------|-------|
 | A | `mail.kaiteki.my` / `webmail.kaiteki.my` | `187.127.122.41` (DNS-only) |
 | MX | `kaiteki.my` | `mail.kaiteki.my` (10) |
 | TXT (SPF) | `kaiteki.my` | `v=spf1 mx -all` |
 | TXT (DKIM) | `v1-rsa-20260628._domainkey` / `v1-ed25519-20260628._domainkey` | `v=DKIM1; …` |
-| TXT (DMARC) | `_dmarc.kaiteki.my` | `v=DMARC1; p=reject; rua=mailto:admin@kaiteki.my; fo=1` |
+| TXT (DMARC) | `_dmarc.kaiteki.my` | `v=DMARC1; p=reject; rua=mailto:admin@blueprintdigital.my; fo=1` (one collector for every domain since #14) |
 
-PTR (Hostinger hPanel): `187.127.122.41` → **`mail.kaiteki.my`** (FCrDNS / deliverability).
+Zone `blueprintdigital.my` (`32c3ac…`), moved here from bpvps2 on 2026-09-12 (#9):
+
+| Record | Name | Value |
+|--------|------|-------|
+| A | `mail.blueprintdigital.my` / `webmail.blueprintdigital.my` | `187.127.122.41` (DNS-only) |
+| MX | `blueprintdigital.my` | `mail.blueprintdigital.my` (10) |
+| TXT (SPF) | `blueprintdigital.my` | `v=spf1 mx -all` — was `mx ip4:187.127.207.82 -all`; the literal is gone so it cannot go stale again |
+| TXT (DKIM) | `v1-rsa-20260912._domainkey` / `v1-ed25519-20260912._domainkey` | generated here in #8; the `20260805` pair (bpvps2's keys) was deleted |
+| TXT (DMARC) | `_dmarc.blueprintdigital.my` | `v=DMARC1; p=reject; rua=mailto:admin@blueprintdigital.my; fo=1` |
+
+> Both zones' mail records are on a **300 s TTL**, so a DNS rollback lands in minutes.
+
+PTR (Hostinger hPanel, manual — no API token for this account): `187.127.122.41` should
+read **`mail.blueprintdigital.my`**, the name Stalwart announces at SMTP greeting time
+(FCrDNS / deliverability). ⚠️ **Still `mail.kaiteki.my` as of the #9 cutover** — the hPanel
+change is pending; FCrDNS still resolves, so deliverability is unaffected until it is done.
 
 > **Anti-spoof: SPF `-all` + DMARC `p=reject` (hardfail) — do not loosen.** `mx` (this VPS)
 > is the *only* authorized sender, so hardfail is safe. Set 2026-07-30 after a forged
@@ -116,7 +144,7 @@ PTR (Hostinger hPanel): `187.127.122.41` → **`mail.kaiteki.my`** (FCrDNS / del
 - **Most config lives in the store**, written over JMAP `x:` methods — there is no admin UI on
   this build. See "Configuring this build" below for the exact calls.
 - Stalwart settings the webmail depends on, all already set in the store: **`defaultHostname =
-  mail.kaiteki.my`**, the **TLS File** cert refs, **`x:Http.useXForwarded = true`**, and an
+  mail.blueprintdigital.my`**, the **TLS File** cert refs, **`x:Http.useXForwarded = true`**, and an
   **`x:AllowedIp`** entry `172.16.0.0/12`. CORS is handled by **Traefik** (Stalwart
   `usePermissiveCors` stays `false`).
 - ⚠️ **The default hostname is a public-DNS commitment.** Stalwart builds the absolute JMAP
@@ -308,7 +336,8 @@ and only indexed properties filter. There is no `changes`/`queryChanges` for `x:
 |---|---|
 | Domains | `kaiteki.my` (id `b`), `blueprintdigital.my` (`c`), `reservetoday.app` (`d`) — all with automatic DKIM |
 | Administrator | **`admin@blueprintdigital.my`** (id `t`). `admin@kaiteki.my` (id `b`) is a plain `User` mailbox again. The recovery admin in `.env` is unchanged. |
-| `defaultHostname` | still **`mail.kaiteki.my`** — deliberately, see the hostname warning |
+| `blueprintdigital.my` mailboxes | `admin@` (`t`), `chriskke@` (`u`), `danielchua@` (`v`), `yuchen@` (`w`) — the last three re-created from bpvps2 in #9 with fresh passwords (`MAIL_PASSWORD_*` in the repo `.env`) |
+| `defaultHostname` | **`mail.blueprintdigital.my`** since #9 (2026-09-12), moved together with the A records — see the hostname warning |
 | `useXForwarded` | `true` (was already) |
 | Allowed IPs | `172.16.0.0/12` (Docker default pool; replaced the `/16`), `60.54.118.137` (Kaiteki office) |
 

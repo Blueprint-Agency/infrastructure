@@ -6,11 +6,12 @@
 # is a domain ADDED to this instance over the JMAP `x:` management API (README.md,
 # "Configuring this build"), never a second stack.
 #
-# JMAP host: https://mail.kaiteki.my              (Stalwart, no admin UI on this build)
-#            https://mail.blueprintdigital.my     (same server, routed and certificated,
-#                                                  reachable once its A record moves here)
-# Webmail  : https://webmail.kaiteki.my           (Bulwark)
-#            https://webmail.blueprintdigital.my  (same container, same caveat)
+# JMAP host: https://mail.blueprintdigital.my     (Stalwart's default hostname, and the MX
+#                                                  target for every domain but kaiteki.my)
+#            https://mail.kaiteki.my              (same server; alias kept for the IMAP
+#                                                  clients already configured with it)
+# Webmail  : https://webmail.blueprintdigital.my  (Bulwark)
+#            https://webmail.kaiteki.my           (same container)
 #
 # TLS: a single LE cert covering all four mail./webmail. names across the two Cloudflare
 # zones is issued out-of-band via Cloudflare DNS-01 (acme.sh, KAITEKI_CF_DNS_API_TOKEN)
@@ -84,19 +85,21 @@ services:
       - HOSTNAME=0.0.0.0
       - PORT=3000
       # Must match Stalwart's default hostname — Bulwark follows the absolute URLs the JMAP
-      # session advertises.
+      # session advertises. Since the 2026-09-12 cutover (#9) that is the platform's
+      # canonical mail host, mail.blueprintdigital.my; mail.kaiteki.my is an alias of the
+      # same box kept alive for already-configured IMAP clients.
       #
       # ⚠️ THIS VALUE IS HANDED TO THE BROWSER, not just used server-side. It is served
       # verbatim as `jmapServerUrl` by https://webmail.<host>/api/config, so the name here is
       # resolved by the VISITOR'S resolver over PUBLIC DNS — the stalwart_mailnet alias on
       # Traefik only covers the container's own lookups. Verified 2026-09-12.
       #
-      # That is why this is still mail.kaiteki.my. `mail.blueprintdigital.my` resolves
-      # publicly to 187.127.207.82 (bpvps2) and answers /jmap/session with HTTP 200 under a
-      # valid certificate of its own, so pointing browsers at it does not fail loudly — it
-      # silently sends every Kaiteki user to a different, near-empty mail server. Repoint
-      # this only after that A record moves to bpvps1 (187.127.122.41).
-      - JMAP_SERVER_URL=https://mail.kaiteki.my
+      # So this name's PUBLIC A record must be this server. Point it at a name that resolves
+      # elsewhere and every webmail user is sent there — with a valid certificate and no
+      # error, if that host also runs a mail server (bpvps2 still does until #12). The hostname
+      # here, Stalwart's defaultHostname and the A record move together or not at all:
+      # docs/mail/hostname-cutover-constraint.md.
+      - JMAP_SERVER_URL=https://mail.blueprintdigital.my
       - STALWART_FEATURES=true                    # password change, Sieve filters, etc.
       # Left as-is deliberately: this is the one Bulwark instance every domain's webmail
       # hostname lands on, so changing it here renames KAITEKI's webmail too. Per-hostname
