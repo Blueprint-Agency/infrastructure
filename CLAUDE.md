@@ -139,6 +139,15 @@ Timezone: **Asia/Kuala_Lumpur**.
 > terminates TLS at the edge and the challenge never lands — and it cannot issue wildcards.
 > Keep `letsencrypt` (DNS-01) for teeko.ai and for any wildcard.
 
+> **bpvps1 is the opposite case, and it works.** Its mail cert is issued out-of-band by
+> `stalwart/renew-cert.sh` (acme.sh, not Traefik) on a **Blueprint** token that is scoped to
+> `kaiteki.my` **and** `blueprintdigital.my`, so since 2026-09-12 one certificate carries all
+> four `mail.`/`webmail.` names across both zones. The name list is `CERT_NAMES` in that script
+> and is asserted in CI by `scripts/test_renew_cert.sh`; the primary must stay
+> `mail.kaiteki.my`, because acme.sh keys its state directory on it. Read the stack README
+> before touching it — the CA has to be pinned, and acme.sh's own record of what it issued
+> cannot be trusted.
+
 ## CI/CD
 
 `.github/workflows/deploy-infra.yml` deploys **all five hosts** from one matrix job.
@@ -322,5 +331,16 @@ never a new script. The parsing half is `scripts/lib/mail-checks.sh` and is cove
 > something was skipped** — so `--skip` can never be mistaken for a passing run.
 
 > Mailbox passwords come from `.env` as `MAIL_PASSWORD_<ACCOUNT>` (uppercased, non-alphanumerics
-> to `_`), or an interactive prompt. Accounts are **not** enumerated — this build's management API
-> does not list principals to scripts, so the accounts to test are arguments.
+> to `_`), or an interactive prompt. `verify-mail.sh` takes the accounts to test as arguments,
+> because "can this real person sign in" is the better test.
+
+`scripts/mail-inventory.py <domain>` is the other half: one JSON snapshot per capture of every
+account, its message count and its bytes, so a migration can be proved invisible by diffing a
+before against an after. Snapshots live in `docs/mail/`.
+
+> ⚠️ **Stalwart v0.16.16 has no admin API and no admin UI that lists accounts** — `/api/*`
+> management paths all 404, the OAuth metadata offers no admin scope, and `/account/` is a
+> self-service page. A ticket that says "capture it from the admin UI" is describing something
+> that does not exist. **JMAP `Principal/get` as the admin mailbox does enumerate every
+> account**, and that is what `mail-inventory.py` uses. Sizes are summed per message, not read
+> from `Quota/get`, which returns empty here because no quotas are set.

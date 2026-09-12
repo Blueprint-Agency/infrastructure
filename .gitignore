@@ -56,3 +56,7 @@ monitoring/loki/data/
 # Node
 node_modules/
 package-lock.json
+
+# Python bytecode, created by running the repo's own scripts from a checkout
+__pycache__/
+*.pyc

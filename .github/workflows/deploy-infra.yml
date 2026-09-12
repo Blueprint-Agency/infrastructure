@@ -74,6 +74,12 @@ jobs:
       - name: Self-check the mail verification checks
         run: bash scripts/test_verify_mail.sh
 
+      # Sources the declarations in bpvps1's renew-cert.sh and asserts the certificate name
+      # list -- above all that the primary name still comes first, because acme.sh keys its
+      # state directory on it and a reorder expires the cert silently 90 days later.
+      - name: Self-check the mail certificate name list
+        run: bash scripts/test_renew_cert.sh
+
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
         with:

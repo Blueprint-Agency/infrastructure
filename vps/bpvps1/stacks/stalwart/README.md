@@ -36,15 +36,46 @@ Stack dir on VPS: `/root/stacks/stalwart/`. Mail data in the `stalwart-data` vol
     bot scan for `*/wp-*`/`*.php*` (HTTP "banned paths") bans the proxy → all mail web UIs return 502.
 
 ## TLS
-One LE cert for `mail.kaiteki.my` + `webmail.kaiteki.my`, issued **out-of-band via
+One LE cert for **four names across two zones** — `mail.kaiteki.my`, `webmail.kaiteki.my`,
+`mail.blueprintdigital.my`, `webmail.blueprintdigital.my` — issued **out-of-band via
 Cloudflare DNS-01** (acme.sh + `KAITEKI_CF_DNS_API_TOKEN`) because Traefik's CF token only
-covers `teeko.ai`. Cert lands in `./certs/{fullchain,key}.pem`.
+covers `teeko.ai`. That one token is a **Blueprint-account** token and is scoped to both
+zones, which is the whole reason a single certificate can span them. Cert lands in
+`./certs/{fullchain,key}.pem`.
 - **Traefik** serves it via the file provider (`stalwart.yml`).
 - **Stalwart** reads the same files for mail TLS — set in the admin UI → Settings → TLS as
   **File** references. ⚠️ The files must be readable by Stalwart's user: `chown 2000:2000 ./certs/*.pem`.
 - Renewal: `renew-cert.sh` (daily host cron) re-runs acme.sh (it **reads `CF_Token` from the
   stack `.env`** — the saved-creds path is unreliable), reinstalls to `./certs`, re-chowns,
-  restarts Stalwart. Cert is **ECC**, acme dir `./acme/mail.kaiteki.my_ecc/`.
+  restarts Stalwart, and **touches `../traefik/dynamic/stalwart.yml`** so Traefik re-reads the
+  cert without a restart. Cert is **ECC**, acme dir `./acme/mail.kaiteki.my_ecc/`.
+- The name list lives in `renew-cert.sh` as `CERT_NAMES` and is asserted by
+  `scripts/test_renew_cert.sh` in CI. Adding a name is an edit to that array and nothing else.
+
+> ⚠️ **`CERT_NAMES[0]` must stay `mail.kaiteki.my`.** acme.sh keys its state directory on the
+> first name, and both the install step and the host cron are hardcoded to
+> `./acme/mail.kaiteki.my_ecc/`. Reordering the array reads as cosmetic and reviews clean, but
+> it points acme.sh at a fresh state dir while the install keeps publishing the old one: the
+> cert silently stops being refreshed and expires 90 days later. **Append, never reorder.**
+
+> ⚠️ **A changed name list is a NEW issuance, not a renewal — so the CA must be pinned.** A
+> renewal reuses the CA recorded against the existing cert; a fresh issuance falls back to
+> acme.sh's own default, which is **ZeroSSL** and needs an EAB account we do not have. Adding
+> the two Blueprint names without `--server letsencrypt` died on *"Please update your account
+> with an email address first"* (2026-09-12). The script now passes it explicitly.
+
+> ⚠️ **acme.sh writes the requested names into its `.conf` BEFORE the order succeeds.** When
+> that ZeroSSL attempt failed, the conf already claimed all four names while the live cert
+> still had two — and every later `--issue` answered *"Domains not changed. Skipping."* The
+> script therefore reads the names off the **certificate**, not the conf, and forces a
+> re-issue when they differ. It cannot force in a loop: once the cert matches, so does the
+> comparison. (Get that normalisation wrong and it force-renews nightly straight into a rate
+> limit — `tr -d '[:space:]'` eats the newlines too. `test_renew_cert.sh` covers it.)
+
+> ⚠️ **An empty `KAITEKI_CF_DNS_API_TOKEN` would hide for two months.** `--issue` checks the
+> renewal date before it touches DNS, so a missing or renamed `.env` line reports "not due"
+> every night and only surfaces on the one night the cert actually had to be renewed. The
+> script now refuses to start on an empty token.
 
 ## DNS (zone `kaiteki.my`, separate CF account — `KAITEKI_CF_DNS_API_TOKEN`, zone `6378ec…`)
 | Record | Name | Value |
@@ -118,16 +149,19 @@ login, and both delivery legs. Run it before and after any change here; it chang
 > files, different serials, and 443 was 14 days from expiry. **Traefik watches its config file, not
 > the cert files the config points at**, so a renewal that swaps the certs without touching
 > `../traefik/dynamic/stalwart.yml` is never noticed. The README line claiming it "auto-reloads on
-> change" was wrong. Fixed by `touch`ing that yml — no restart, no downtime — and the permanent fix
-> (a `touch` at the end of `renew-cert.sh`) is tracked on #7. All three ports now serve the same
-> serial. That is why `verify-mail.sh` checks 443 and 465 separately rather than assuming one cert.
+> change" was wrong. Fixed by `touch`ing that yml — no restart, no downtime. **The permanent fix
+> landed with #7**: `renew-cert.sh` now touches that file after every install, and exits non-zero
+> if the file is missing rather than reporting a renewal that only reached the mail ports. All
+> ports serve the same serial. That is why `verify-mail.sh` checks 443 and 465 separately rather
+> than assuming one cert.
 
-> ⚠️ **Stalwart logs `Multiple TLS certificates available (total = 2)` continuously**, while
-> `/opt/stalwart/certs/` holds exactly one `fullchain.pem`. The second certificate is in the
-> **store** (admin UI → Settings → TLS), not on disk — a leftover entry from an earlier config.
-> Stalwart chooses between them, so which cert the mail ports present is not fully determined.
-> Verified 2026-09-12, not yet cleaned up. Check here first if a mail client ever complains about
-> a certificate while `verify-mail.sh` is green.
+> **Stalwart logs `Multiple TLS certificates available` continuously — the number is SAN
+> NAMES, not certificates, and it is harmless.** The earlier reading of this, that a leftover
+> entry in the store meant "which cert the mail ports present is not fully determined", was
+> wrong and is corrected here. `total` went from **2 to 4 at the exact moment** the cert went
+> from two names to four (2026-09-12), with one `fullchain.pem` on disk throughout and no
+> change to the store. It is counting resolvable SNI names. There is one certificate and
+> `verify-mail.sh` checks its serial on 443 and 465 separately, which is the real guard.
 
 ## Ops
 ```bash
@@ -146,3 +180,44 @@ docker compose pull && docker compose up -d
 > `deploy` has no passwordless sudo and `/root/stacks/stalwart` is root-owned — to update a
 > file there, pipe it through a container:
 > `cat file | ssh bp-bpvps1 "docker run --rm -i -v /root/stacks/stalwart:/s alpine sh -c 'cat > /s/file'"`
+
+### Proving a backup is restorable
+
+`tar -tf` proves the archive is readable, not that Stalwart can open what is inside it. Restore
+into a **scratch volume** and let Stalwart itself read the store — the live volume is never
+touched, so this is safe to run against production at any time:
+
+```bash
+docker volume create stalwart-restoretest
+docker run --rm -v stalwart-restoretest:/d -v /home/deploy/backups:/b:ro \
+  alpine tar xf /b/stalwart-data-<stamp>.tar -C /d
+mkdir -p /tmp/stexport && chown 2000:2000 /tmp/stexport   # Stalwart runs as uid 2000
+docker run --rm --entrypoint /usr/local/bin/stalwart \
+  -v stalwart-restoretest:/opt/stalwart \
+  -v /root/stacks/stalwart/config.json:/etc/stalwart/config.json:ro \
+  -v /tmp/stexport:/out \
+  stalwartlabs/stalwart:v0.16.16 --export /out --config /etc/stalwart/config.json
+rm -rf /tmp/stexport; docker volume rm stalwart-restoretest
+```
+
+> Two traps. The image's **ENTRYPOINT is the binary itself**, so `docker run … stalwart --export`
+> passes `stalwart` as an argument and just prints usage — override the entrypoint. And the
+> output directory must be writable by **uid 2000**, or the export dies mid-run with
+> `Failed to create backup file: Permission denied` while still exiting **0**.
+
+> `--console` needs an argument this build does not document and could not be invoked. Budget
+> ~15 GB free: the restore is a second full copy of the store.
+
+### Listing accounts
+
+There is **no admin API and no admin UI that lists accounts** on v0.16.16 — `/api/principal`
+and every sibling 404 (through Traefik and directly on the container), the OAuth metadata
+offers only `mail`/`contacts`/`calendars` scopes so there is no admin scope to ask for, and
+`/account/` is a self-service page whose JS bundle holds exactly two routes. Any instruction
+to "read it out of the admin UI" is describing something this build does not have.
+
+**JMAP does it instead.** The admin mailbox can run `Principal/get`, which returns every
+account on the server, and can query other accounts' mail. That is what
+`scripts/mail-inventory.py <domain>` is built on — see `docs/mail/`. It is also why
+`verify-mail.sh` takes the accounts to test as arguments: that predates knowing this worked,
+and "can this real person sign in" is still the better test.
