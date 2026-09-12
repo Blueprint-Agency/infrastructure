@@ -14,7 +14,7 @@ already-configured Kaiteki IMAP clients never need touching.
 | | URL | Login |
 |---|---|---|
 | Stalwart self-service | `https://mail.blueprintdigital.my` (→ `/account`) | any mailbox |
-| Webmail | `https://webmail.blueprintdigital.my` / `https://webmail.kaiteki.my` | mailbox creds — any domain's mailbox at either hostname |
+| Webmail | `https://webmail.blueprintdigital.my` / `https://webmail.kaiteki.my` / `https://webmail.reservetoday.app` | mailbox creds — any domain's mailbox at any hostname |
 | Bulwark admin dashboard | `https://webmail.kaiteki.my/admin` | `ADMIN_PASSWORD` (stack `.env`, `BULWARK_ADMIN_PASSWORD`) |
 | Management API | JMAP `x:` methods, see "Configuring this build" | `admin@blueprintdigital.my` (Admin role) |
 
@@ -46,12 +46,18 @@ Stack dir on VPS: `/root/stacks/stalwart/`. Mail data in the `stalwart-data` vol
     bot scan for `*/wp-*`/`*.php*` (HTTP "banned paths") bans the proxy → all mail web UIs return 502.
 
 ## TLS
-One LE cert for **four names across two zones** — `mail.kaiteki.my`, `webmail.kaiteki.my`,
-`mail.blueprintdigital.my`, `webmail.blueprintdigital.my` — issued **out-of-band via
-Cloudflare DNS-01** (acme.sh + `KAITEKI_CF_DNS_API_TOKEN`) because Traefik's CF token only
-covers `teeko.ai`. That one token is a **Blueprint-account** token and is scoped to both
-zones, which is the whole reason a single certificate can span them. Cert lands in
-`./certs/{fullchain,key}.pem`.
+Two certificates, two issuers, and the split is by **which DNS provider serves the zone**:
+
+| Names | Zone DNS | Issued by | Renewed by |
+|---|---|---|---|
+| `mail.kaiteki.my`, `webmail.kaiteki.my`, `mail.blueprintdigital.my`, `webmail.blueprintdigital.my` | Cloudflare (Blueprint account) | acme.sh, **DNS-01** | `renew-cert.sh`, daily host cron |
+| `webmail.reservetoday.app` | **Vercel** | Traefik's `le-tls` resolver, **TLS-ALPN-01** | Traefik itself, in-process |
+
+**The shared cert.** One LE cert for the four Cloudflare-zone names, issued **out-of-band
+via Cloudflare DNS-01** (acme.sh + `KAITEKI_CF_DNS_API_TOKEN`) because Traefik's CF token
+only covers `teeko.ai`. That one token is a **Blueprint-account** token and is scoped to
+both zones, which is the whole reason a single certificate can span them. Cert lands in
+`./certs/{fullchain,key}.pem`. Stalwart's mail ports use **only** this one.
 - **Traefik** serves it via the file provider (`stalwart.yml`).
 - **Stalwart** reads the same files for mail TLS through **one `x:Certificate` object in the
   store** whose `certificate` / `privateKey` are `@type: File` pointers at
@@ -90,6 +96,34 @@ zones, which is the whole reason a single certificate can span them. Cert lands 
 > renewal date before it touches DNS, so a missing or renamed `.env` line reports "not due"
 > every night and only surfaces on the one night the cert actually had to be renewed. The
 > script now refuses to start on an empty token.
+
+**The Vercel-zone cert — `webmail.reservetoday.app` (#19).** `reservetoday.app` is served by
+Vercel's nameservers, so no Cloudflare token can answer a DNS-01 challenge for it, and the
+shared cert cannot carry the name (**do not add it to `CERT_NAMES`** — acme.sh would fail
+DNS-01 on that one name and the whole four-name renewal with it). It gets its own
+certificate from bpvps1's Traefik: resolver `le-tls` (`../traefik/docker-compose.yml`),
+**TLS-ALPN-01**, router `bulwark-reservetoday` in `../traefik/dynamic/stalwart.yml` with
+`tls.certResolver: le-tls` instead of the file cert. Stored in the `infra_traefik-letsencrypt`
+volume as `acme-tls.json`. Same resolver bpvps2 runs for the booking API.
+
+- **Why not acme.sh's `dns_vercel` plugin** (the ticket's other route, which would have kept
+  one cert and one cron): the plugin has no `teamId` support — it calls `/v4/domains/<name>`
+  bare — and `blueprintdigitalmy` is a Vercel **team**, so it cannot see the zone at all.
+  Making it work means patching a vendored plugin *and* keeping a Vercel API token in the
+  stack `.env`. TLS-ALPN-01 needs neither; it proves control of :443, which Traefik already
+  terminates. The cost is a second certificate — which changes nothing Stalwart sees.
+- **Renewal is Traefik's own and needs no reload.** Traefik re-checks daily, renews 30 days
+  out, and swaps the certificate in memory; there is no file to touch, no cron, and
+  `renew-cert.sh` knows nothing about this name. Exercised on 2026-09-12: the stored cert was
+  removed from `acme-tls.json`, Traefik restarted, and port 443 served a **new serial**
+  (`05646AFD…` replacing `06B8E28F…`) eight seconds later with no further step. A
+  `renew-cert.sh` touch of `stalwart.yml` afterwards left it in place.
+- **The A record must exist before the router asks, and at Vercel.** Vercel serves a `*`
+  ALIAS, so a name without a record resolves to Vercel and the challenge lands on the wrong
+  box with no error here — `docs/tls-wildcard-constraint.md`. `vercel dns ls reservetoday.app
+  --scope blueprintdigitalmy | grep webmail` is the check.
+- `verify-mail.sh reservetoday.app` covers it: `WEBMAIL_HOST` is the new name, so the TLS,
+  branding and CORS checks all run against this certificate and router.
 
 ## DNS (both zones in the Blueprint CF account — `KAITEKI_CF_DNS_API_TOKEN` covers both)
 
@@ -220,9 +254,13 @@ the request `Host` / `X-Forwarded-Host` (Traefik forwards both) and answers it a
   them means a Bulwark *theme*, which #5 puts out of scope. The version line is off
   (`LOGIN_SHOW_VERSION=false`).
 - **Onboarding a client's webmail** = a DNS record for `webmail.<client>`, a Traefik router +
-  CORS origin (`../traefik/dynamic/stalwart.yml`), the name added to `CERT_NAMES` in
-  `renew-cert.sh`, a folder under `./branding/`, a mount line, a `DOMAIN_BRANDING` entry, and a
-  `scripts/verify-mail.d/<domain>.conf`. Never a second container.
+  CORS origin (`../traefik/dynamic/stalwart.yml`), the certificate (the name added to
+  `CERT_NAMES` in `renew-cert.sh` for a Cloudflare zone; its own `le-tls` router for any
+  other provider — "TLS" above), a folder under `./branding/`, a mount line, a
+  `DOMAIN_BRANDING` entry, and a `scripts/verify-mail.d/<domain>.conf`. Never a second
+  container. Three brands so far: `blueprint`, `kaiteki`, `reservetoday` (whose lockup is
+  the booking product's `platform-mark.svg` plus outlined Manrope Bold, for the same
+  `<img>` reason as the Blueprint wordmark).
 - To push a change: `docker compose up -d bulwark` on the host (see Ops for how to get files
   into the root-owned stack dir). Bulwark reads `DOMAIN_BRANDING` at startup.
 

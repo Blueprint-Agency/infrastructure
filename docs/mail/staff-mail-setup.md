@@ -17,7 +17,7 @@ Open the webmail for your brand in any browser, phone included. Nothing to insta
 | Your address ends in | Go to |
 |---|---|
 | `@blueprintdigital.my` | **https://webmail.blueprintdigital.my** |
-| `@reservetoday.app` | **https://webmail.blueprintdigital.my** (there is no separate reservetoday webmail — this is the right one) |
+| `@reservetoday.app` | **https://webmail.reservetoday.app** |
 | `@kaiteki.my` | **https://webmail.kaiteki.my** |
 
 - **Username:** your full email address, e.g. `danielchua@blueprintdigital.my`

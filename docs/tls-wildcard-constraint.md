@@ -98,12 +98,18 @@ change: 27 → 27 for the `_dmarc` edit, 27 → 31 for the four additions — th
   could read — until 2026-09-12; the new record was added before the old one was removed, so
   the name was never empty. `rua` is a **different domain**, so `blueprintdigital.my` publishes
   the RFC 7489 §7.1 consent record `reservetoday.app._report._dmarc` (#14).
-- The MX is the shared platform host. The domain has no `mail.` / `webmail.` name of its own
-  on purpose: its users sign in at `webmail.blueprintdigital.my`, and a vanity name would need
-  DNS-01 against Vercel — a different ACME plugin and credential (spec #5, "Certificates").
+- The MX is the shared platform host. The domain has no `mail.` name of its own on purpose.
+- **`webmail.reservetoday.app` exists since #19** (`A 187.127.122.41`, the one record added
+  in that ticket; 26 → 27, everything else byte-identical). It is the same Bulwark as
+  `webmail.blueprintdigital.my` under the product's own name. Its certificate is the
+  exception to "the mail cert is acme.sh DNS-01": that path cannot reach a Vercel zone, and
+  acme.sh's `dns_vercel` plugin cannot either (no `teamId` — `blueprintdigitalmy` is a team),
+  so bpvps1's Traefik issues this one name over **TLS-ALPN-01** — the same `le-tls` resolver
+  bpvps2 uses for the booking API. Detail: `vps/bpvps1/stacks/stalwart/README.md`, "TLS".
 
 `scripts/verify-mail.sh reservetoday.app` is the check: 13/13 on 2026-09-12, including
-inbound through the MX and an outbound probe that passed SPF, DKIM and DMARC alignment.
+inbound through the MX and an outbound probe that passed SPF, DKIM and DMARC alignment;
+13/13 again after #19 with the webmail checks pointed at the new name.
 Its expectations are `scripts/verify-mail.d/reservetoday.app.conf`.
 
 ## If this ever needs to change

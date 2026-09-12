@@ -12,12 +12,14 @@
 #                                                  clients already configured with it)
 # Webmail  : https://webmail.blueprintdigital.my  (Bulwark)
 #            https://webmail.kaiteki.my           (same container)
+#            https://webmail.reservetoday.app     (same container; own cert, see below)
 #
-# TLS: a single LE cert covering all four mail./webmail. names across the two Cloudflare
+# TLS: a single LE cert covering the four mail./webmail. names across the two Cloudflare
 # zones is issued out-of-band via Cloudflare DNS-01 (acme.sh, KAITEKI_CF_DNS_API_TOKEN)
 # into ./certs and is used by BOTH Stalwart (mail ports, TLS settings referencing the
 # files) AND Traefik (web UIs, file provider). Name list: CERT_NAMES in renew-cert.sh.
-# See README.md.
+# webmail.reservetoday.app is NOT in that list: its zone is on Vercel, so Traefik issues
+# it separately over TLS-ALPN-01 (`le-tls`, ../traefik/docker-compose.yml). See README.md.
 #
 # Bulwark talks to Stalwart over JMAP (HTTPS). It reaches the server at
 # https://mail.kaiteki.my, which resolves INTERNALLY to Traefik (network alias on
@@ -158,8 +160,18 @@ services:
         {"host":"webmail.blueprintdigital.my",
         "appName":"Blueprint Mail","loginCompanyName":"Blueprint Digital","loginWebsiteUrl":"https://blueprintdigital.my",
         "faviconUrl":"/branding/blueprint/icon.svg",
-        "loginLogoLightUrl":"/branding/blueprint/login-light.svg","loginLogoDarkUrl":"/branding/blueprint/login-dark.svg"}
+        "loginLogoLightUrl":"/branding/blueprint/login-light.svg","loginLogoDarkUrl":"/branding/blueprint/login-dark.svg"},
+        {"host":"webmail.reservetoday.app",
+        "appName":"Reserve Today Mail","appShortName":"Reserve Today","appDescription":"Webmail for Reserve Today",
+        "faviconUrl":"/branding/reservetoday/icon.svg","pwaIconUrl":"/branding/reservetoday/icon.svg",
+        "pwaThemeColor":"#0f172a","pwaBackgroundColor":"#ffffff",
+        "appLogoLightUrl":"/branding/reservetoday/login-light.svg","appLogoDarkUrl":"/branding/reservetoday/login-dark.svg",
+        "loginLogoLightUrl":"/branding/reservetoday/login-light.svg","loginLogoDarkUrl":"/branding/reservetoday/login-dark.svg",
+        "loginCompanyName":"Reserve Today","loginWebsiteUrl":"https://reservetoday.app"}
         ]
+      # Reserve Today (#19): the mark is booking-system's own platform-mark.svg (the
+      # product's identity, deliberately no studio's); the wordmark is outlined Manrope
+      # Bold, the product's typeface. Slate #0f172a is the mark's plate colour.
       # The Blueprint entry repeats the globals ON PURPOSE: the globals are what an
       # unlisted hostname gets, and this entry is what webmail.blueprintdigital.my gets.
       # Keeping it complete means a later edit to the defaults cannot silently restyle
@@ -172,6 +184,7 @@ services:
       # falls back to them. A new client = a new line here + a DOMAIN_BRANDING entry.
       - ./branding/blueprint:/app/public/branding/blueprint:ro
       - ./branding/kaiteki:/app/public/branding/kaiteki:ro
+      - ./branding/reservetoday:/app/public/branding/reservetoday:ro
       - bulwark-settings:/app/data/settings        # encrypted per-user settings
       - bulwark-admin:/app/data/admin              # admin config, plugins, themes, branding
       - bulwark-admin-state:/app/data/admin-state  # admin login state, audit log, setup token

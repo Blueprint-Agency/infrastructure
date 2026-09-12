@@ -1,0 +1,20 @@
+<!--
+  ReserveToday's own mark, and deliberately nobody's studio.
+
+  It is the fallback a tab shows when a studio has set no `favicon_url`. The
+  files that used to sit here were tenant #1's actual logo, so every other
+  studio on the platform wore tenant #1's branding until it uploaded its own —
+  the one fallback that must never be another tenant's asset.
+
+  Flat, single-colour and geometric on purpose: it has to read at 16px, and it
+  has to look like infrastructure rather than like a yoga studio.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="ReserveToday">
+  <rect width="64" height="64" rx="14" fill="#0f172a" />
+  <path
+    d="M20 16h24a2 2 0 0 1 2 2v30.6a1.4 1.4 0 0 1-2.2 1.14L32 41.2l-11.8 8.54A1.4 1.4 0 0 1 18 48.6V18a2 2 0 0 1 2-2Z"
+    fill="#f8fafc"
+  />
+  <rect x="26" y="24" width="12" height="3.2" rx="1.6" fill="#0f172a" />
+  <rect x="26" y="31" width="12" height="3.2" rx="1.6" fill="#0f172a" />
+</svg>

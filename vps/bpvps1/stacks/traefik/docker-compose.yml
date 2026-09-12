@@ -7,7 +7,7 @@ services:
       - "--api.dashboard=true"
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
-      # File provider supplies the Stalwart/Roundcube routes + the kaiteki.my cert.
+      # File provider supplies the Stalwart/Bulwark routes + the shared mail cert.
       - "--providers.file.directory=/dynamic"
       - "--providers.file.watch=true"
       - "--entrypoints.web.address=:80"
@@ -17,6 +17,21 @@ services:
       - "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
       - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      # `le-tls` — TLS-ALPN-01: no credential, one exact hostname per certificate. Added
+      # for webmail.reservetoday.app (#19). That zone is served by VERCEL, so neither
+      # acme.sh's Cloudflare DNS-01 (the four mail./webmail. names in ../stalwart) nor
+      # the `letsencrypt` resolver above can prove it. acme.sh's dns_vercel plugin was
+      # ruled out too: it has no teamId support and `blueprintdigitalmy` is a Vercel
+      # TEAM, so it cannot see the zone at all. Same resolver bpvps2 runs for booking.
+      #
+      # The A record must be DNS-only (it is: nothing proxies Vercel DNS) and must exist
+      # BEFORE the router asks — Vercel serves a `*` ALIAS, so a name with no record
+      # resolves to Vercel and the challenge lands on the wrong box. Renewal is Traefik's
+      # own: 30 days out, swapped in memory, no reload step and no cron. The
+      # ../stalwart/renew-cert.sh cron is unchanged and knows nothing about this name.
+      - "--certificatesresolvers.le-tls.acme.tlschallenge=true"
+      - "--certificatesresolvers.le-tls.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.le-tls.acme.storage=/letsencrypt/acme-tls.json"
       - "--log.level=INFO"
     ports:
       - "80:80"

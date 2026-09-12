@@ -221,12 +221,14 @@ mail:
       production: bpvps1
     port: 3000
     domain:
-      production: webmail.blueprintdigital.my   # + webmail.kaiteki.my, same container, per-hostname branding
+      production: webmail.blueprintdigital.my   # + webmail.kaiteki.my + webmail.reservetoday.app, same container, per-hostname branding
     db: null                  # stores no mail; JMAP client of stalwart
     notes: "Webmail for every domain on the platform, one container behind many hostnames.
-      DOMAIN_BRANDING in the compose picks the brand per request Host (#11); a domain without
-      its own webmail hostname (reservetoday.app) signs in at webmail.blueprintdigital.my.
-      SESSION_SECRET must never rotate — it encrypts every user's saved settings."
+      DOMAIN_BRANDING in the compose picks the brand per request Host (#11). Every domain has
+      its own hostname since #19; any mailbox can still sign in at any of them.
+      webmail.reservetoday.app is on its own Traefik-issued cert (TLS-ALPN-01, Vercel zone),
+      the other names on the shared acme.sh cert. SESSION_SECRET must never rotate — it
+      encrypts every user's saved settings."
 
 # Already removed (migration complete):
 # - stalwart / unbound / bulwark on bpvps2 (2026-09-12, #12 — mail consolidated onto bpvps1)

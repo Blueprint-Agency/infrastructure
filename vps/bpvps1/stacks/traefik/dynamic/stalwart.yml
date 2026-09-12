@@ -6,18 +6,27 @@
 #   mail.kaiteki.my             -> the same Stalwart; alias kept for configured IMAP clients
 #   webmail.blueprintdigital.my -> Bulwark webmail (bulwark:3000)
 #   webmail.kaiteki.my          -> the same Bulwark
+#   webmail.reservetoday.app    -> the same Bulwark, on its OWN certificate (see below)
 #
-# All four A records point here (187.127.122.41). Routing a name before its A record moved
+# All five A records point here (187.127.122.41). Routing a name before its A record moved
 # cost nothing and removed a step from the cutover: the hosts answered the moment the
-# record landed, on a certificate that already covered them.
+# record landed, on a certificate that already covered them. (Not true of the
+# reservetoday name — its certificate is only requested once the record resolves here.)
 #
 # One Stalwart and one Bulwark serve all of these. A second container per domain would
 # double the RAM, the upgrades and the config drift for nothing: Bulwark stores no mail,
 # and Stalwart is multi-domain by design.
 #
 # Traefik terminates TLS here using the file cert (no per-host ACME — Traefik's own CF token
-# only covers teeko.ai). The one acme.sh cert carries all four names across the two zones;
-# the name list is CERT_NAMES in ../../stalwart/renew-cert.sh. Traefik reaches the containers
+# only covers teeko.ai). The one acme.sh cert carries the four mail./webmail. names across
+# the two Cloudflare zones; the name list is CERT_NAMES in ../../stalwart/renew-cert.sh.
+#
+# webmail.reservetoday.app is the exception (#19): its zone is on Vercel, which no DNS-01
+# credential here can reach, so it gets its own certificate from Traefik's `le-tls`
+# resolver (TLS-ALPN-01, defined in ../docker-compose.yml) and therefore its own router —
+# a router carries ONE tls block, and `tls: {}` (file cert) and `certResolver` are
+# different blocks. Do not add that name to CERT_NAMES: acme.sh would fail DNS-01 on it
+# and the whole four-name renewal with it. Traefik reaches the containers
 # over the external stalwart_mailnet network (see the traefik compose), which also carries the
 # mail.* network aliases that let Bulwark reach the Stalwart JMAP host internally.
 #
@@ -27,11 +36,11 @@
 # host: it reflects the specific webmail origin + allows credentials, and answers preflight
 # directly. (Stalwart's permissive CORS must be OFF so we don't emit duplicate ACAO headers.)
 #
-# ⚠️ BOTH webmail origins must be listed, and the list is an ALLOW-LIST, not a wildcard.
+# ⚠️ EVERY webmail origin must be listed, and the list is an ALLOW-LIST, not a wildcard.
 # Traefik reflects back whichever origin in the list the browser sent. A cross-domain login —
 # a kaiteki.my mailbox signing in at webmail.blueprintdigital.my, or the reverse — is intended
 # behaviour here, and it is the browser's origin that decides which entry is needed, not the
-# mailbox's domain. Drop either entry and that login fails preflight with no server-side error.
+# mailbox's domain. Drop an entry and that login fails preflight with no server-side error.
 tls:
   certificates:
     - certFile: /certs/fullchain.pem
@@ -43,6 +52,7 @@ http:
         accessControlAllowOriginList:
           - "https://webmail.blueprintdigital.my"
           - "https://webmail.kaiteki.my"
+          - "https://webmail.reservetoday.app"
         accessControlAllowCredentials: true
         accessControlAllowHeaders:
           - Authorization
@@ -81,6 +91,17 @@ http:
       rule: "Host(`webmail.blueprintdigital.my`) || Host(`webmail.kaiteki.my`)"
       service: bulwark
       tls: {}
+    # The one deliberate second router for a service (#19): same Bulwark, but this name's
+    # certificate comes from the `le-tls` ACME resolver, not the file cert above, and a
+    # router has exactly one tls block. Everything else about it — service, no CORS
+    # middleware (Bulwark itself is same-origin; CORS is on the mail.* router) — matches
+    # `bulwark`. If a third Vercel-served name ever appears, it joins THIS rule with `||`.
+    bulwark-reservetoday:
+      entryPoints: [websecure]
+      rule: "Host(`webmail.reservetoday.app`)"
+      service: bulwark
+      tls:
+        certResolver: le-tls
   services:
     stalwart-admin:
       loadBalancer:

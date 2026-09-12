@@ -154,7 +154,9 @@ Timezone: **Asia/Kuala_Lumpur**.
 > and is asserted in CI by `scripts/test_renew_cert.sh`; the primary must stay
 > `mail.kaiteki.my`, because acme.sh keys its state directory on it. Read the stack README
 > before touching it — the CA has to be pinned, and acme.sh's own record of what it issued
-> cannot be trusted.
+> cannot be trusted. **`webmail.reservetoday.app` is deliberately NOT in that list** (#19):
+> its zone is on Vercel, so bpvps1's Traefik carries a `le-tls` (TLS-ALPN-01) resolver for
+> that one name — the same trick as bpvps2 — and Traefik renews it itself.
 
 ## CI/CD
 

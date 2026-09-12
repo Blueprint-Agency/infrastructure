@@ -61,25 +61,35 @@ Done when `dig +short MX <domain>` returns the shared host from 1.1.1.1 and 8.8.
 
 ## 3. Vanity webmail hostname — optional
 
-Skip this if the client is happy signing in at `webmail.blueprintdigital.my`
-(reservetoday.app does). Otherwise `webmail.<domain>` needs four things, and the first
-one gates the rest:
+Skip this if the client is happy signing in at `webmail.blueprintdigital.my`. Otherwise
+`webmail.<domain>` needs four things, and the certificate route depends on **who serves
+the zone** (step 2's `dig NS`):
 
-1. **Certificate SAN.** The cert is one acme.sh certificate issued on
-   `KAITEKI_CF_DNS_API_TOKEN`, so the zone must be in the **Blueprint Cloudflare account** and
-   the token scoped to it — otherwise DNS-01 fails and there is no vanity host. *Append*
-   `webmail.<domain>` to `CERT_NAMES` in `vps/bpvps1/stacks/stalwart/renew-cert.sh` — never
-   reorder, `mail.kaiteki.my` stays first — push the file to the host and run it. Done when
-   the script prints `cert RENEWED` and `scripts/test_renew_cert.sh` passes.
-2. **A record** `webmail.<domain>` → `187.127.122.41`, DNS-only (grey cloud).
-3. **Traefik router + CORS**, `vps/bpvps1/stacks/traefik/dynamic/stalwart.yml`: add
-   `|| Host(`webmail.<domain>`)` to the `bulwark` router rule, and the origin
-   `https://webmail.<domain>` to `mail-cors.accessControlAllowOriginList`. Both, or login
-   fails preflight with no server-side error. The file provider reloads on save; a broken
-   rule only shows in `docker logs traefik`.
+1. **Certificate.**
+   - **Zone on Cloudflare, Blueprint account** (the token `KAITEKI_CF_DNS_API_TOKEN` must be
+     scoped to it): *append* `webmail.<domain>` to `CERT_NAMES` in
+     `vps/bpvps1/stacks/stalwart/renew-cert.sh` — never reorder, `mail.kaiteki.my` stays
+     first — push the file to the host and run it. Done when the script prints
+     `cert RENEWED` and `scripts/test_renew_cert.sh` passes. The router in 3 then uses
+     `tls: {}` (the file cert) and joins the `bulwark` rule with `||`.
+   - **Zone anywhere else** (Vercel, a registrar): the name **cannot** go in `CERT_NAMES` —
+     acme.sh would fail DNS-01 on it and take the four-name renewal down with it. Give it its
+     own router with `tls.certResolver: le-tls` (TLS-ALPN-01, no credential; Traefik renews
+     it itself). `bulwark-reservetoday` in `stalwart.yml` is the worked example, and the
+     README "TLS" section is why (`dns_vercel` cannot address a team zone). The A record must
+     resolve here **before** Traefik asks, or the challenge lands on the provider's wildcard.
+2. **A record** `webmail.<domain>` → `187.127.122.41`, DNS-only (grey cloud on Cloudflare;
+   Vercel has no proxy), at the provider from step 2.
+3. **Traefik router + CORS**, `vps/bpvps1/stacks/traefik/dynamic/stalwart.yml`: the router
+   per the route above, and the origin `https://webmail.<domain>` added to
+   `mail-cors.accessControlAllowOriginList`. Both, or login fails preflight with no
+   server-side error. The file provider reloads on save; a broken rule only shows in
+   `docker logs traefik`. A new `certResolver` reference also needs the traefik container
+   recreated once (`compose up -d traefik`), which restarts every web route on the host.
 4. **Nothing on the Traefik `mailnet` aliases** — those are for `mail.*` names only.
 
-Done when `curl -sI https://webmail.<domain>/` is `200` under the shared certificate.
+Done when `curl -sI https://webmail.<domain>/` answers (Bulwark 307s `/` to its login
+page) under a certificate whose SAN is that name.
 
 ## 4. Branding entry
 
@@ -106,8 +116,10 @@ Done when every address is in `x:Account/get` and has a `MAIL_PASSWORD_*` line.
 
 ## 6. Verify — the only definition of finished
 
-- `scripts/verify-mail.d/<domain>.conf` — copy `reservetoday.app.conf` (no vanity host) or
-  `blueprintdigital.my.conf` (vanity host) and fill every key; a blank key fails the run.
+- `scripts/verify-mail.d/<domain>.conf` — copy `reservetoday.app.conf` (a client domain on
+  the shared MX with its own webmail name) and fill every key; a blank key fails the run.
+  Without a vanity host, `WEBMAIL_HOST` is `webmail.blueprintdigital.my` and
+  `BRANDING_EXPECT` is the Blueprint brand.
 - Add `<domain>` to the `for domain in …` line near the end of `scripts/test_verify_mail.sh`
   (the "conf exists for" assertion — every conf is already checked by glob), then
   `bash scripts/test_verify_mail.sh` green.
