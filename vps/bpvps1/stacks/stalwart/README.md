@@ -254,8 +254,13 @@ login, and both delivery legs. Run it before and after any change here; it chang
 > `x:Certificate/get` returned exactly **one** object throughout; `total` went from 2 to 4 at
 > the moment the cert went from two names to four. What was observed:
 > `x:SystemSettings.defaultCertificateId` was `null`, and the warning fired every 30 s.
-> Setting it to the file cert's id and restarting Stalwart stopped it (0 in the next 10 min,
-> versus one per 30 s before). On that day 443/465/993 — `openssl s_client` with and without
+> Setting it to the file cert's id and restarting Stalwart stopped it (0 in the 26 min after
+> the 14:57:33Z restart, versus one per 30 s before). ⚠️ **Count from the restart, not from
+> "now":** `docker logs --since 30m` reaches back past a restart and returns the pre-restart
+> warnings, which is exactly how a re-check at 15:21Z read "16 in 30 min" and reopened this
+> as unfixed. The only number that means anything is
+> `docker logs --since "$(docker inspect stalwart --format '{{.State.StartedAt}}')" stalwart 2>&1 | grep -c multiple-certificates`.
+> On that day 443/465/993 — `openssl s_client` with and without
 > `-servername` — all served the file serial; the standing guard is `verify-mail.sh`, which
 > checks the serial on 443 and 465 separately. **In-store ACME stays off**:
 > `x:AcmeProvider/get` is empty and all three domains are `certificateManagement: Manual`.
@@ -284,7 +289,10 @@ docker compose pull stalwart && docker compose up -d stalwart
 > The `.16 → .21` bump on 2026-09-12 (#13) took **22 s** of mail downtime (14:22:39 →
 > 14:23:01 UTC), almost all of it the 7.8 GB backup tar; pre-pull the image so the swap
 > itself is a container recreate. Canary any future bump on a non-production
-> instance first — bpvps2 played that role for #13 and is gone after #12.
+> instance first — bpvps2 played that role for #13 and was deleted in #12 (2026-09-12), so
+> the next bump needs a throwaway: a scratch `stalwart-data` volume restored from the backup
+> tar ("Proving a backup is restorable" below) run on the new tag with `--export`, or a
+> spare host. There is no second live instance any more.
 >
 > **Rollback** is the reverse: put the old tag back in the compose, `up -d stalwart`. The
 > store is forward-compatible within 0.16.x, so the backup tar is only for a *damaged* store,
