@@ -68,32 +68,43 @@ vercel dns ls reservetoday.app | grep api
 pki.goog and sectigo.com), so Let's Encrypt is permitted to issue. A new backend
 hostname needs no CAA change.
 
-## Mail records on `reservetoday.app` — what is published, and what is deliberately not
+## Mail records on `reservetoday.app` — published 2026-09-12 (#10)
 
-As of 2026-09-12 the zone carries **no MX and no SPF**. The only mail record is DMARC:
+The domain receives mail on the shared platform host since 2026-09-12. Five records, all
+added with `vercel dns add reservetoday.app … --scope blueprintdigitalmy`:
 
 ```
-_dmarc  TXT  v=DMARC1; p=quarantine; adkim=r; aspf=r; rua=mailto:admin@blueprintdigital.my;
+@                                MX   10 mail.blueprintdigital.my
+@                                TXT  v=spf1 mx ~all
+v1-rsa-20260912._domainkey       TXT  v=DKIM1; k=rsa; h=sha256; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3QR50FoTQzSCaoMsuT+XxEkdlAD3Y+txF+BAo+uC7J0vlddstVh+kire/98nhWLvZZYxLw0YDwjyHQc6JVGH0ouN6HCbTSbklx9vmw6X6wjxOfh4rzkB7A3XbHhrMKVh0W/QmAD3PT34xYBYCf0IQz/iIeQ+TUTfFasFzXeWKPGD/f24p95U8eCY7zJ9TjdSqysb5WPhWGfYBgDhRP1ut9cJFVeGXA5/FzxnTPdSe3kY8UFa/gNjr1MxYyWmRmLvOJl2jT4V/FH3uoxP7R6pZArypbqS0365ZTwvcFhkUgZD9lvUozJoa5lEzWjj7knkNsdbQRfSLHB0cxxXMqr8VQIDAQAB
+v1-ed25519-20260912._domainkey   TXT  v=DKIM1; k=ed25519; h=sha256; p=RK0SHFwCg+KaVOR8U50jUvdtoV2fN8vOg7imzMh0LcM=
+_dmarc                           TXT  v=DMARC1; p=quarantine; adkim=r; aspf=r; rua=mailto:admin@blueprintdigital.my;
 ```
 
-The `rua` used to be `dmarc_rua@onsecureserver.net` — the registrar's third-party collector,
-which nobody here could read. Changed 2026-09-12 (#10) by `vercel dns add` of the new record
-and then `vercel dns rm` of the old one, in that order, so the name was never empty. Policy,
-`adkim` and `aspf` are unchanged. Every other record was diffed before/after: 27 → 27, only
-`_dmarc` differs. **`p=quarantine` stays** until real reports show Clerk's three apps passing.
+The DKIM keys are the pair Stalwart generated on bpvps1 in #8 (`x:Domain/get` →
+`dnsZoneFile` is the ready-to-paste source; Vercel accepted the 2048-bit RSA value as one
+string and splits it on the wire itself). Every other record was diffed before/after each
+change: 27 → 27 for the `_dmarc` edit, 27 → 31 for the four additions — the apex ALIAS, `*`,
+`api`, `api.dev` and every Clerk `clk*` / `clerk` / `accounts` record are byte-identical.
 
-> `rua` points at a **different domain**, so RFC 7489 §7.1 wants `blueprintdigital.my` to
-> consent: `reservetoday.app._report._dmarc.blueprintdigital.my TXT "v=DMARC1"` (Cloudflare,
-> Blueprint account). Without it, compliant reporters drop the report instead of sending it.
-> Published 2026-09-12 (#14), alongside the matching `kaiteki.my._report._dmarc` record —
-> both point at the same one inbox, so both need consent.
+**This posture is deliberately soft, and there is no `mail.reservetoday.app`.**
 
-The MX / SPF / DKIM for this domain are **held back on purpose** (#10). The spec's MX target
-is the shared `mail.blueprintdigital.my`, which still resolves to bpvps2 until #9 moves it, and
-bpvps1 is not ready to accept the domain until #8 (behind #13) is closed. Publishing an MX
-before then would only make mail bounce. When they land, SPF is `v=spf1 mx ~all` — soft,
-because Clerk already sends from this domain — and Stalwart's selectors must not collide with
-Clerk's `clk`/`clk2` CNAMEs.
+- **SPF is `~all`, DMARC stays `p=quarantine`.** Three Clerk apps (the apex, `portal`,
+  `admin.portal`) already send the booking product's auth mail from this domain under their
+  own `clk` / `clk2` selectors. A hardfail here could send magic links to spam. Tighten to
+  `-all` / `p=reject` only after the DMARC reports at `admin@blueprintdigital.my` show Clerk
+  passing. (Stalwart's own `dnsZoneFile` suggests `-all` / `p=reject` — ignore that half.)
+- The `rua` was `dmarc_rua@onsecureserver.net` — the registrar's collector, which nobody here
+  could read — until 2026-09-12; the new record was added before the old one was removed, so
+  the name was never empty. `rua` is a **different domain**, so `blueprintdigital.my` publishes
+  the RFC 7489 §7.1 consent record `reservetoday.app._report._dmarc` (#14).
+- The MX is the shared platform host. The domain has no `mail.` / `webmail.` name of its own
+  on purpose: its users sign in at `webmail.blueprintdigital.my`, and a vanity name would need
+  DNS-01 against Vercel — a different ACME plugin and credential (spec #5, "Certificates").
+
+`scripts/verify-mail.sh reservetoday.app` is the check: 13/13 on 2026-09-12, including
+inbound through the MX and an outbound probe that passed SPF, DKIM and DMARC alignment.
+Its expectations are `scripts/verify-mail.d/reservetoday.app.conf`.
 
 ## If this ever needs to change
 

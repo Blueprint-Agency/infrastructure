@@ -115,6 +115,20 @@ PTR (Hostinger hPanel, manual — no API token for this account): `187.127.122.4
 read **`mail.blueprintdigital.my`**, the name Stalwart announces at SMTP greeting time
 (FCrDNS / deliverability). ⚠️ **Still `mail.kaiteki.my` as of the #9 cutover** — the hPanel
 change is pending; FCrDNS still resolves, so deliverability is unaffected until it is done.
+Zone `reservetoday.app` — **not Cloudflare: Vercel is authoritative** (`vercel dns … --scope
+blueprintdigitalmy`; the Cloudflare zone of that name is a dead copy). Published 2026-09-12 (#10):
+
+| Record | Name | Value |
+|--------|------|-------|
+| MX | `reservetoday.app` | `mail.blueprintdigital.my` (10) — the shared host; no `mail.reservetoday.app` exists, on purpose |
+| TXT (SPF) | `reservetoday.app` | `v=spf1 mx ~all` — **soft**, three Clerk apps also send from this domain |
+| TXT (DKIM) | `v1-rsa-20260912._domainkey` / `v1-ed25519-20260912._domainkey` | generated here in #8; Clerk's `clk` / `clk2` CNAMEs sit alongside and are not ours |
+| TXT (DMARC) | `_dmarc.reservetoday.app` | `v=DMARC1; p=quarantine; adkim=r; aspf=r; rua=mailto:admin@blueprintdigital.my;` |
+
+> **Do not "fix" this zone up to `-all` / `p=reject`** to match the other two until DMARC
+> reports show Clerk passing — a hardfail here can send the booking product's magic links to
+> spam. The full reasoning and the record diffs are in `docs/tls-wildcard-constraint.md`.
+
 
 > **Anti-spoof: SPF `-all` + DMARC `p=reject` (hardfail) — do not loosen.** `mx` (this VPS)
 > is the *only* authorized sender, so hardfail is safe. Set 2026-07-30 after a forged
@@ -379,3 +393,4 @@ and only indexed properties filter. There is no `changes`/`queryChanges` for `x:
 authenticate as `admin@blueprintdigital.my` (`INVENTORY_ACCOUNT` in the domain conf,
 `MAIL_PASSWORD_ADMIN_BLUEPRINTDIGITAL_MY` in `.env`). The Kaiteki admin can still list
 accounts, but every read of another mailbox is `forbidden`.
+| `reservetoday.app` mailboxes | `hello@` (`x`, #15), `admin@` (`y`, #10) — both plain `User`; the domain's DNS went live 2026-09-12 (#10) |

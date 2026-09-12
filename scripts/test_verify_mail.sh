@@ -220,8 +220,7 @@ ok 'port25 subdomain dkim is aligned' 0 port25_verdict "$SUBDOMAIN" 'kaiteki.my'
 # The expectations files themselves. verify-mail.sh dies at startup on a blank key, but
 # only for the one domain being run -- a conf for a domain nobody has run yet could sit
 # broken in the repo until the cutover it exists for. So every conf is checked here, and
-# every domain that is LIVE on the platform must have one (reservetoday.app joins the
-# list when #10 publishes its mail records).
+# every domain that is LIVE on the platform must have one.
 # --------------------------------------------------------------------------------------
 CONF_KEYS='MAIL_HOST WEBMAIL_HOST EXPECT_MX EXPECT_JMAP_HOST EXPECT_SPF_ALL EXPECT_DMARC_POLICY EXPECT_DMARC_RUA DKIM_SELECTORS BRANDING_EXPECT DEFAULT_ACCOUNTS INVENTORY_ACCOUNT'
 
@@ -239,7 +238,7 @@ conf_complete() (
 for conf in "$HERE"/verify-mail.d/*.conf; do
   ok "conf complete: $(basename "$conf")" 0 conf_complete "$conf"
 done
-for domain in kaiteki.my blueprintdigital.my; do
+for domain in kaiteki.my blueprintdigital.my reservetoday.app; do
   ok "conf exists for $domain" 0 test -f "$HERE/verify-mail.d/$domain.conf"
 done
 
