@@ -68,6 +68,32 @@ vercel dns ls reservetoday.app | grep api
 pki.goog and sectigo.com), so Let's Encrypt is permitted to issue. A new backend
 hostname needs no CAA change.
 
+## Mail records on `reservetoday.app` — what is published, and what is deliberately not
+
+As of 2026-09-12 the zone carries **no MX and no SPF**. The only mail record is DMARC:
+
+```
+_dmarc  TXT  v=DMARC1; p=quarantine; adkim=r; aspf=r; rua=mailto:admin@blueprintdigital.my;
+```
+
+The `rua` used to be `dmarc_rua@onsecureserver.net` — the registrar's third-party collector,
+which nobody here could read. Changed 2026-09-12 (#10) by `vercel dns add` of the new record
+and then `vercel dns rm` of the old one, in that order, so the name was never empty. Policy,
+`adkim` and `aspf` are unchanged. Every other record was diffed before/after: 27 → 27, only
+`_dmarc` differs. **`p=quarantine` stays** until real reports show Clerk's three apps passing.
+
+> `rua` points at a **different domain**, so RFC 7489 §7.1 wants `blueprintdigital.my` to
+> consent: `reservetoday.app._report._dmarc.blueprintdigital.my TXT "v=DMARC1"` (Cloudflare,
+> Blueprint account). Without it, compliant reporters drop the report instead of sending it.
+> Not yet published — add it with the rest of the mail records in #10.
+
+The MX / SPF / DKIM for this domain are **held back on purpose** (#10). The spec's MX target
+is the shared `mail.blueprintdigital.my`, which still resolves to bpvps2 until #9 moves it, and
+bpvps1 is not ready to accept the domain until #8 (behind #13) is closed. Publishing an MX
+before then would only make mail bounce. When they land, SPF is `v=spf1 mx ~all` — soft,
+because Clerk already sends from this domain — and Stalwart's selectors must not collide with
+Clerk's `clk`/`clk2` CNAMEs.
+
 ## If this ever needs to change
 
 Split Traefik's DNS-01 credentials per resolver. As of Traefik v3.3 the Cloudflare
