@@ -112,12 +112,17 @@ volume as `acme-tls.json`. Same resolver bpvps2 runs for the booking API.
   Making it work means patching a vendored plugin *and* keeping a Vercel API token in the
   stack `.env`. TLS-ALPN-01 needs neither; it proves control of :443, which Traefik already
   terminates. The cost is a second certificate — which changes nothing Stalwart sees.
-- **Renewal is Traefik's own and needs no reload.** Traefik re-checks daily, renews 30 days
-  out, and swaps the certificate in memory; there is no file to touch, no cron, and
-  `renew-cert.sh` knows nothing about this name. Exercised on 2026-09-12: the stored cert was
-  removed from `acme-tls.json`, Traefik restarted, and port 443 served a **new serial**
-  (`05646AFD…` replacing `06B8E28F…`) eight seconds later with no further step. A
-  `renew-cert.sh` touch of `stalwart.yml` afterwards left it in place.
+- **Renewal is Traefik's own and needs no reload.** Per Traefik's ACME docs it re-checks
+  daily, renews 30 days out, and swaps the certificate in memory — no file to touch, no
+  cron, and `renew-cert.sh` knows nothing about this name. That in-process swap is
+  documented behaviour, **not something observed here**: Traefik has no force-renew, so
+  the closest thing to a rehearsal was run on 2026-09-12 — the stored cert removed from
+  `acme-tls.json`, Traefik restarted, and port 443 serving a **new serial** (`05646AFD…`
+  replacing `06B8E28F…`) eight seconds later with no further step. What that proves is
+  that issuance and the path from `acme-tls.json` to the wire need nobody's hand; a
+  `renew-cert.sh` touch of `stalwart.yml` afterwards left it in place. The first real
+  renewal is due around **2026-11-11**; `verify-mail.sh reservetoday.app` will flag it
+  (`TLS_MIN_DAYS`) if it does not happen.
 - **The A record must exist before the router asks, and at Vercel.** Vercel serves a `*`
   ALIAS, so a name without a record resolves to Vercel and the challenge lands on the wrong
   box with no error here — `docs/tls-wildcard-constraint.md`. `vercel dns ls reservetoday.app
@@ -158,6 +163,7 @@ blueprintdigitalmy`; the Cloudflare zone of that name is a dead copy). Published
 | TXT (SPF) | `reservetoday.app` | `v=spf1 mx ~all` — **soft**, three Clerk apps also send from this domain |
 | TXT (DKIM) | `v1-rsa-20260912._domainkey` / `v1-ed25519-20260912._domainkey` | generated here in #8; Clerk's `clk` / `clk2` CNAMEs sit alongside and are not ours |
 | TXT (DMARC) | `_dmarc.reservetoday.app` | `v=DMARC1; p=quarantine; adkim=r; aspf=r; rua=mailto:admin@blueprintdigital.my;` |
+| A | `webmail.reservetoday.app` | `187.127.122.41` — added 2026-09-12 (#19); the vanity webmail, on Traefik's own `le-tls` cert ("TLS" above) |
 
 > **Do not "fix" this zone up to `-all` / `p=reject`** to match the other two until DMARC
 > reports show Clerk passing — a hardfail here can send the booking product's magic links to

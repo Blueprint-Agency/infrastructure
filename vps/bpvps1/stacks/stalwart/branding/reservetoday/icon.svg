@@ -1,13 +1,8 @@
 <!--
-  ReserveToday's own mark, and deliberately nobody's studio.
-
-  It is the fallback a tab shows when a studio has set no `favicon_url`. The
-  files that used to sit here were tenant #1's actual logo, so every other
-  studio on the platform wore tenant #1's branding until it uploaded its own —
-  the one fallback that must never be another tenant's asset.
-
-  Flat, single-colour and geometric on purpose: it has to read at 16px, and it
-  has to look like infrastructure rather than like a yoga studio.
+  Bulwark favicon / PWA icon for webmail.reservetoday.app (#19). This is booking-system's
+  fe-client/public/brand/platform-mark.svg, verbatim: the product's own mark, deliberately
+  no studio's. Flat and geometric so it reads at 16px. If the product's mark changes,
+  copy the new file over this one (and regenerate the login-*.svg lockups from it).
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="ReserveToday">
   <rect width="64" height="64" rx="14" fill="#0f172a" />
