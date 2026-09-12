@@ -115,10 +115,11 @@ services:
       #
       # The globals are the agency default. Each webmail hostname then overrides what
       # differs in DOMAIN_BRANDING, matched on the request Host / X-Forwarded-Host, so one
-      # container answers as a different brand per URL. Onboarding a client's webmail is
-      # one more entry here plus its logos under ./branding/<client>/ -- never a second
-      # container. Colours are blueprint_marketing_website design tokens: night #1c1039,
-      # night-deep #120926, tungsten #ffb13c.
+      # container answers as a different brand per URL. Onboarding a client's webmail
+      # touches this file twice (an entry here, a mount below) and a few others -- the
+      # full list is README.md "Branding" -- but never a second container. Colours are
+      # blueprint_marketing_website design tokens: night #1c1039, night-deep #120926,
+      # tungsten #ffb13c.
       - APP_NAME=Blueprint Mail
       - APP_SHORT_NAME=Mail
       - APP_DESCRIPTION=Webmail for Blueprint Digital and its clients
@@ -155,8 +156,14 @@ services:
         "loginLogoLightUrl":"/branding/kaiteki/login-light.png","loginLogoDarkUrl":"/branding/kaiteki/login-dark.png",
         "loginCompanyName":"Kaiteki","loginWebsiteUrl":"https://kaiteki.my"},
         {"host":"webmail.blueprintdigital.my",
-        "appName":"Blueprint Mail","loginCompanyName":"Blueprint Digital","loginWebsiteUrl":"https://blueprintdigital.my"}
+        "appName":"Blueprint Mail","loginCompanyName":"Blueprint Digital","loginWebsiteUrl":"https://blueprintdigital.my",
+        "faviconUrl":"/branding/blueprint/icon.svg",
+        "loginLogoLightUrl":"/branding/blueprint/login-light.svg","loginLogoDarkUrl":"/branding/blueprint/login-dark.svg"}
         ]
+      # The Blueprint entry repeats the globals ON PURPOSE: the globals are what an
+      # unlisted hostname gets, and this entry is what webmail.blueprintdigital.my gets.
+      # Keeping it complete means a later edit to the defaults cannot silently restyle
+      # the agency's own webmail, and verify-mail.sh asserts the entry, not the fallback.
     volumes:
       # Logo files, served by Bulwark at /branding/<brand>/... beside its own stock marks
       # (Next.js serves /app/public from disk at request time, so a bind mount is enough;

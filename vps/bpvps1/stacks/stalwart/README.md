@@ -187,7 +187,12 @@ the request `Host` / `X-Forwarded-Host` (Traefik forwards both) and answers it a
 - **Logo files live in `./branding/<brand>/` and are bind-mounted** to
   `/app/public/branding/<brand>` (read-only). Next.js serves `/app/public` from disk at request
   time, so a new file is live on the next request; no image rebuild. Each brand has a light and a
-  dark login logo — Kaiteki's dark one is the same PNG with the taupe lifted to cream.
+  dark login logo — Kaiteki's dark one is the same PNG with the taupe lifted to cream. The
+  Blueprint lockup's "Blueprint" is **outlined Archivo** (wdth 75 / wght 900, the marketing
+  site's display axes), not a `font-family` reference: Bulwark loads the logo through `<img>`,
+  and an SVG loaded that way cannot pull a web font, so text would render in whatever the
+  visitor has installed. Regenerate with fontTools if the wordmark changes; don't hand-edit the
+  path data.
 - **The login page's colours are Bulwark's, not ours.** The supported branding surface is logos,
   names, links, favicon and the PWA theme/background colours (`#1c1039` / `#120926`, from the
   marketing site's tokens). The blue button and the card are Bulwark's stock theme; changing
