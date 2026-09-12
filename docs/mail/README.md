@@ -1,8 +1,9 @@
 # Mail inventories
 
-Account-by-account snapshots of a mail domain, one JSON file per capture, named
-`<domain>-inventory-<date>.json`. They exist so a migration can be proved invisible: capture
-before, capture after, diff the two.
+Account-by-account snapshots of the mail platform, one JSON file per capture, named
+`<domain>-inventory-<date>[-<why>].json` — or `platform-inventory-…` once a capture spans
+every domain (all of them do now; see the note under the table). They exist so a migration
+can be proved invisible: capture before, capture after, diff the two.
 
 Produce one with the script, never by hand:
 
@@ -43,7 +44,7 @@ instance and `Quota/get` accordingly returns an empty list for every account.
 | File | Domain | Taken | Why |
 |---|---|---|---|
 | `kaiteki.my-inventory-2026-09-12.json` | kaiteki.my | 2026-09-12 | The **before** half for the Stalwart consolidation (#5), captured alongside the verified backup in #7. 17 accounts, 158,907 messages. |
-| `platform-inventory-2026-09-12-after-issue15.json` | all three (run as `blueprintdigital.my`) | 2026-09-12 | After the staff mailboxes (#15). 23 accounts: Kaiteki's 17 unchanged in name and size except `admin@kaiteki.my`, which had received 16 new messages — a live inbox, not drift — plus `admin@`/`chriskke@`/`danielchua@`/`yuchen@blueprintdigital.my` and `admin@`/`hello@reservetoday.app`. |
+| `platform-inventory-2026-09-12-after-issue15.json` | all three (run as `blueprintdigital.my`) | 2026-09-12 | After the staff mailboxes (#15). 23 accounts: Kaiteki's same 17 by name, 15 of them byte-identical to the after-#8 capture; `admin@kaiteki.my` (+16 messages) and `ks.finance@kaiteki.my` (+1) had simply received mail in between — live inboxes, not drift. Plus `admin@`/`chriskke@`/`danielchua@`/`yuchen@blueprintdigital.my` and `admin@`/`hello@reservetoday.app`. |
 
 > **The script lists the whole platform, whatever domain you name.** `Principal/get`
 > enumerates every account on the instance; the domain argument only picks the conf (and
@@ -52,8 +53,8 @@ instance and `Quota/get` accordingly returns an empty list for every account.
 ## Staff-facing
 
 [`staff-mail-setup.md`](staff-mail-setup.md) is the one-page card handed to a new mailbox
-owner (webmail first; IMAP 993/465 SSL; full address as username), with the operator's
-temporary-password convention at the bottom. The per-domain onboarding checklist — the
+owner, with the operator's temporary-password convention at the bottom. The ports and
+hostnames live there and only there. The per-domain onboarding checklist — the
 `onboard-mail-domain` skill, `.claude/skills/onboard-mail-domain/SKILL.md` (#12) — links to
 it at its "mailboxes" step.
 

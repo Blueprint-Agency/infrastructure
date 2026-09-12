@@ -59,8 +59,8 @@ Three things that trip people up:
   the domain in your address does not change the server name. (Kaiteki devices set up
   before September 2026 use `mail.kaiteki.my`; that still works, same box.)
 - **Pick SSL/TLS, not STARTTLS.** If the app asks for STARTTLS or suggests port **587**
-  or **143**, say no — those ports are deliberately closed and it will just time out.
-  It is 993 in and 465 out, both "SSL".
+  or **143**, say no — those are not offered, and the app will report that it cannot
+  connect. It is 993 in and 465 out, both "SSL".
 - **Username is the whole address**, not the part before the `@`.
 
 ## 3. Something's wrong?
@@ -79,8 +79,10 @@ Still stuck: `admin@blueprintdigital.my`.
 ## Convention (for the operator)
 
 This is how every mailbox on the platform is issued. It is a **convention**, not a
-feature: Stalwart 0.16 has no "must change password at next login" flag, so the forced
-change is the hand-over script plus the webmail's own password-change page.
+feature: we found no "must change password at next login" setting in this Stalwart build
+(0.16.x — checked the live `/api/schema` on 2026-09-12; the nearest thing is an
+`expiresAt` on a credential, which would lock the account rather than prompt a change),
+so the forced change is the hand-over script plus the webmail's own password-change page.
 
 1. **Create the account** with a random temporary password — see "Configuring this
    build" in `vps/bpvps1/stacks/stalwart/README.md` (`x:Account/set`). Generate it
