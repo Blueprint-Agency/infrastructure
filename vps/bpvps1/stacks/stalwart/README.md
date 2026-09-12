@@ -178,7 +178,7 @@ change is pending; FCrDNS still resolves, so deliverability is unaffected until 
   (`*/wp-*`, `*.php*`, …) bans the proxy and **every mail web UI 502s**. The two settings above fix
   it: XFF trust makes bans use the real client IP, and the Allowed-IPs entry exempts the proxy.
   > The entry was `172.16.0.0/16` until 2026-09-12, which was only correct **here** because this
-  > host's `stalwart_mailnet` happens to be `172.16.3.0/24` — bpvps2's mailnet is `172.21.0.0/16`,
+  > host's `stalwart_mailnet` happens to be `172.16.3.0/24` — bpvps2's mailnet was `172.21.0.0/16`,
   > outside it. It is now **`172.16.0.0/12`**, Docker's whole default pool, which is the value
   > to use on any host. Check with `docker network inspect stalwart_mailnet` before trusting it.
   > Bans persist in the store — restarting Stalwart does **not** clear them.

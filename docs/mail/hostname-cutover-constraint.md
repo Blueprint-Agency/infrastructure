@@ -64,7 +64,7 @@ The A record and the default hostname move **together**, and neither moves befor
 2. Immediately after: Stalwart's default hostname and Bulwark's `JMAP_SERVER_URL`.
 
 Step 1 is **not** safe on its own, and this document must not be read as saying it is. It is
-the same trap in reverse: bpvps2 runs its own Stalwart + Bulwark on those names, so its users'
+the same trap in reverse: bpvps2 ran its own Stalwart + Bulwark on those names (until #12), so its users'
 browsers are sent to bpvps1 — valid cert, no warning — where their mailbox does not exist unless
 step 0 happened. It also moves inbound mail for `blueprintdigital.my`, because that zone's MX
 names `mail.blueprintdigital.my`; any address bpvps1 does not hold **bounces** from that point.

@@ -110,7 +110,7 @@ Five things the compose files will not tell you — all of them "do not prune":
 > *added* to that instance, never a second stack or host: the `onboard-mail-domain` skill
 > (`.claude/skills/onboard-mail-domain/SKILL.md`) is the checklist. bpvps2's copy of the stack
 > was deleted on 2026-09-12 (#12) with its 52 MB of test mail; nothing there listens on a mail
-> port any more. The three containers there are the whole stack — `unbound` is not an orphan.
+> port any more. On bpvps1 those three containers are the whole stack — `unbound` is not an orphan.
 
 > The `n8n` stack on VPS3 carries **three** containers, not two: `n8n-prod`, `n8n-db`, and
 > `waba-db` (service `db-waba`, `postgres:alpine`). `waba-db` is a separate database that happens to

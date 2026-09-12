@@ -16,14 +16,16 @@ Two facts shape every step:
 - **The mail host is shared.** The MX for a new domain is `mail.blueprintdigital.my`. A client
   never gets a `mail.<client>` — that is what keeps the certificate short and the DNS work
   small. A `webmail.<client>` vanity host is optional (step 3).
-- **`/root/stacks/stalwart` on bpvps1 is root-owned.** File writes go through the `alpine`
-  pipe and `docker compose` runs from a `docker:cli` container — both recipes are in
-  CLAUDE.md ("bpvps1's `stalwart` and `traefik` stacks are root-owned"). `compose up -d
-  bulwark` recreates `stalwart` and `unbound` too (dependency chain): ~7 s of mail-port
-  downtime, so batch the compose edits from steps 3 and 4 into one `up`.
+- **`/root/stacks/stalwart` on bpvps1 is root-owned.** `docker compose` runs from a
+  `docker:cli` container (recipe in CLAUDE.md, "bpvps1's `stalwart` and `traefik` stacks are
+  root-owned"); file writes go through the `alpine` pipe (recipe in the README, "Ops").
+  In #9, `compose up -d bulwark` was observed to recreate `stalwart` and `unbound` as well
+  (~7 s of mail-port downtime), so batch the compose edits from steps 3 and 4 into one `up`
+  and expect a blip.
 
-`<domain>` below is the client's zone (`example.my`); `<brand>` is a short lowercase
-folder name for it.
+`<domain>` below is the client's zone (`example.my`). `<brand>` is a short lowercase name
+used only for the logo folder and its mount path (`branding/<brand>/`); everything Bulwark
+matches on is the hostname `webmail.<domain>`.
 
 ## 1. Stalwart: the domain exists
 
@@ -31,7 +33,9 @@ folder name for it.
 loopback `:8090`. Automatic DKIM generates both key pairs on create.
 
 Done when `x:Domain/get` lists `<domain>` with `isEnabled: true` and
-`certificateManagement: {"@type":"Manual"}`, and its `dnsZoneFile` shows two
+`certificateManagement: {"@type":"Manual"}` (the default — `reservetoday.app` was created
+with exactly the README shape and came out Manual; if yours says `Automatic`, set it back,
+or Stalwart mints a second certificate Traefik never sees), and its `dnsZoneFile` shows two
 `v1-*-<date>._domainkey` TXT records. Copy that zone file — step 2 pastes from it.
 
 ## 2. DNS, at the provider that actually answers
@@ -104,7 +108,8 @@ Done when every address is in `x:Account/get` and has a `MAIL_PASSWORD_*` line.
 
 - `scripts/verify-mail.d/<domain>.conf` — copy `reservetoday.app.conf` (no vanity host) or
   `blueprintdigital.my.conf` (vanity host) and fill every key; a blank key fails the run.
-- Add `<domain>` to the domain list in `scripts/test_verify_mail.sh`, then
+- Add `<domain>` to the `for domain in …` line near the end of `scripts/test_verify_mail.sh`
+  (the "conf exists for" assertion — every conf is already checked by glob), then
   `bash scripts/test_verify_mail.sh` green.
 - `./scripts/verify-mail.sh <domain> <one real mailbox>` → **exit 0**. Exit 3 means something
   was skipped and is not green.
