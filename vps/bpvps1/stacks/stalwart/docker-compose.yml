@@ -1,20 +1,31 @@
-# Self-hosted email for kaiteki.my — Stalwart mail server + Bulwark (JMAP) webmail,
-# co-hosted on BPVPS1 behind the existing Traefik. (Bulwark replaced Roundcube; the
-# mail host was renamed email.kaiteki.my -> mail.kaiteki.my.)
+# Self-hosted email — one Stalwart mail server + one Bulwark (JMAP) webmail, co-hosted on
+# BPVPS1 behind the existing Traefik, built to serve MANY domains. (Bulwark replaced
+# Roundcube; the mail host was renamed email.kaiteki.my -> mail.kaiteki.my.)
 #
-# Admin UI : https://mail.kaiteki.my     (Stalwart admin + JMAP endpoint)
-# Webmail  : https://webmail.kaiteki.my  (Bulwark)
+# Domains held here: kaiteki.my, blueprintdigital.my, reservetoday.app. A new client domain
+# is a domain ADDED to this instance over the JMAP `x:` management API (README.md,
+# "Configuring this build"), never a second stack.
 #
-# TLS: a single LE cert (mail.kaiteki.my + webmail.kaiteki.my) is issued out-of-band
-# via Cloudflare DNS-01 (acme.sh, KAITEKI_CF_DNS_API_TOKEN) into ./certs and is used by
-# BOTH Stalwart (mail ports, set in the admin UI -> Settings -> TLS, reading the files)
-# AND Traefik (web UIs, file provider). See README.md.
+# JMAP host: https://mail.kaiteki.my              (Stalwart, no admin UI on this build)
+#            https://mail.blueprintdigital.my     (same server, routed and certificated,
+#                                                  reachable once its A record moves here)
+# Webmail  : https://webmail.kaiteki.my           (Bulwark)
+#            https://webmail.blueprintdigital.my  (same container, same caveat)
+#
+# TLS: a single LE cert covering all four mail./webmail. names across the two Cloudflare
+# zones is issued out-of-band via Cloudflare DNS-01 (acme.sh, KAITEKI_CF_DNS_API_TOKEN)
+# into ./certs and is used by BOTH Stalwart (mail ports, TLS settings referencing the
+# files) AND Traefik (web UIs, file provider). Name list: CERT_NAMES in renew-cert.sh.
+# See README.md.
 #
 # Bulwark talks to Stalwart over JMAP (HTTPS). It reaches the server at
 # https://mail.kaiteki.my, which resolves INTERNALLY to Traefik (network alias on
 # stalwart_mailnet, set in ../traefik/docker-compose.yml) so the LE cert verifies and
-# Traefik proxies to stalwart:8080. Stalwart's JMAP session advertises absolute
-# mail.kaiteki.my URLs, so its hostname MUST be set to mail.kaiteki.my in the admin UI.
+# Traefik proxies to stalwart:8080. Stalwart's JMAP session advertises ABSOLUTE URLs built
+# from its DEFAULT HOSTNAME and ignores the request's Host header entirely (verified
+# 2026-09-12) — so JMAP_SERVER_URL below and Stalwart's default hostname must name the same
+# host, and that host must resolve to THIS server for the browser as well as the container.
+# Changing one without the other is the single most likely way to break this stack.
 #
 # IMPORTANT: config.json (the storage pointer) is bind-mounted so a container recreate
 # does NOT wipe Stalwart back into bootstrap mode. Do not remove it.
@@ -72,10 +83,29 @@ services:
     environment:
       - HOSTNAME=0.0.0.0
       - PORT=3000
-      - JMAP_SERVER_URL=https://mail.kaiteki.my   # -> Traefik (mailnet alias) -> stalwart:8080
+      # Must match Stalwart's default hostname — Bulwark follows the absolute URLs the JMAP
+      # session advertises.
+      #
+      # ⚠️ THIS VALUE IS HANDED TO THE BROWSER, not just used server-side. It is served
+      # verbatim as `jmapServerUrl` by https://webmail.<host>/api/config, so the name here is
+      # resolved by the VISITOR'S resolver over PUBLIC DNS — the stalwart_mailnet alias on
+      # Traefik only covers the container's own lookups. Verified 2026-09-12.
+      #
+      # That is why this is still mail.kaiteki.my. `mail.blueprintdigital.my` resolves
+      # publicly to 187.127.207.82 (bpvps2) and answers /jmap/session with HTTP 200 under a
+      # valid certificate of its own, so pointing browsers at it does not fail loudly — it
+      # silently sends every Kaiteki user to a different, near-empty mail server. Repoint
+      # this only after that A record moves to bpvps1 (187.127.122.41).
+      - JMAP_SERVER_URL=https://mail.kaiteki.my
       - STALWART_FEATURES=true                    # password change, Sieve filters, etc.
+      # Left as-is deliberately: this is the one Bulwark instance every domain's webmail
+      # hostname lands on, so changing it here renames KAITEKI's webmail too. Per-hostname
+      # branding (DOMAIN_BRANDING) is the fix, and it is a separate piece of work.
       - APP_NAME=Kaiteki Mail
       - SETTINGS_SYNC_ENABLED=true                # server-side per-user settings (needs SESSION_SECRET)
+      # ⚠️ NEVER rotate SESSION_SECRET. It encrypts the per-user settings already written to
+      # the bulwark-settings volume; a new value does not log people out, it makes every
+      # existing user's saved settings undecryptable.
       - SESSION_SECRET=${BULWARK_SESSION_SECRET}  # openssl rand -base64 32; real value in stack .env
       - ADMIN_PASSWORD=${BULWARK_ADMIN_PASSWORD}  # enables Bulwark's built-in admin dashboard (/admin)
     volumes:

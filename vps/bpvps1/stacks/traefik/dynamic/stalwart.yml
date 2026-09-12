@@ -1,17 +1,37 @@
-# Traefik dynamic config — serves the shared LE cert (acme.sh DNS-01) and routes the
-# Kaiteki mail web UIs.
-#   mail.kaiteki.my    -> Stalwart admin + JMAP endpoint (stalwart:8080)
-#   webmail.kaiteki.my -> Bulwark webmail (bulwark:3000)
-# Traefik terminates TLS here using the file cert (no per-host ACME — Traefik's CF token
-# only covers teeko.ai, not kaiteki.my). Traefik reaches the containers over the external
-# stalwart_mailnet network (see traefik compose). The mail.kaiteki.my network alias on
-# Traefik (compose) lets Bulwark reach the Stalwart JMAP host internally with a valid cert.
+# Traefik dynamic config — serves the shared LE cert (acme.sh DNS-01) and routes the mail
+# web UIs for every domain this Stalwart is to hold.
+#   mail.kaiteki.my             -> Stalwart admin + JMAP endpoint (stalwart:8080)  [live]
+#   webmail.kaiteki.my          -> Bulwark webmail (bulwark:3000)                  [live]
+#   mail.blueprintdigital.my    -> the same Stalwart   } routed and certificated here, but
+#   webmail.blueprintdigital.my -> the same Bulwark    } their A records still point at
+#                                                      } bpvps2, so nothing reaches these
+#                                                      } yet. Staged, not live.
+#
+# Routing a name Traefik does not yet receive traffic for costs nothing and removes a step
+# from the cutover: when the A records move, these hosts answer immediately on a
+# certificate that already covers them.
+#
+# One Stalwart and one Bulwark serve all of these. A second container per domain would
+# double the RAM, the upgrades and the config drift for nothing: Bulwark stores no mail,
+# and Stalwart is multi-domain by design.
+#
+# Traefik terminates TLS here using the file cert (no per-host ACME — Traefik's own CF token
+# only covers teeko.ai). The one acme.sh cert carries all four names across the two zones;
+# the name list is CERT_NAMES in ../../stalwart/renew-cert.sh. Traefik reaches the containers
+# over the external stalwart_mailnet network (see the traefik compose), which also carries the
+# mail.* network aliases that let Bulwark reach the Stalwart JMAP host internally.
 #
 # CORS: Bulwark's BROWSER calls JMAP cross-origin (webmail. -> mail.), including
 # /.well-known/jmap. Stalwart's own "permissive CORS" only emits `*` and does NOT cover the
 # .well-known/jmap discovery redirect, which breaks login. So Traefik owns CORS for the mail
 # host: it reflects the specific webmail origin + allows credentials, and answers preflight
 # directly. (Stalwart's permissive CORS must be OFF so we don't emit duplicate ACAO headers.)
+#
+# ⚠️ BOTH webmail origins must be listed, and the list is an ALLOW-LIST, not a wildcard.
+# Traefik reflects back whichever origin in the list the browser sent. A cross-domain login —
+# a kaiteki.my mailbox signing in at webmail.blueprintdigital.my, or the reverse — is intended
+# behaviour here, and it is the browser's origin that decides which entry is needed, not the
+# mailbox's domain. Drop either entry and that login fails preflight with no server-side error.
 tls:
   certificates:
     - certFile: /certs/fullchain.pem
@@ -21,6 +41,7 @@ http:
     mail-cors:
       headers:
         accessControlAllowOriginList:
+          - "https://webmail.blueprintdigital.my"
           - "https://webmail.kaiteki.my"
         accessControlAllowCredentials: true
         accessControlAllowHeaders:
@@ -39,15 +60,25 @@ http:
         accessControlMaxAge: 100
         addVaryHeader: true
   routers:
+    # One router per service, both names in its rule — not a router per hostname. They share a
+    # service, a middleware and a certificate, so a second router would only be a second
+    # place to forget an edit.
+    #
+    # ⚠️ Two names means `Host(`a`) || Host(`b`)`, NOT `Host(`a`, `b`)`. The multi-argument
+    # form parses as valid YAML and is accepted by the file provider, then fails at router
+    # build time on Traefik v3.3 with "unexpected number of parameters; got 2, expected one
+    # of [1]" — and a router that fails to build is a router that does not exist, so every
+    # name on it 404s while the config file looks perfectly reasonable. Seen for real here on
+    # 2026-09-12. The error only appears in `docker logs traefik`; nothing else reports it.
     stalwart-admin:
       entryPoints: [websecure]
-      rule: "Host(`mail.kaiteki.my`)"
+      rule: "Host(`mail.blueprintdigital.my`) || Host(`mail.kaiteki.my`)"
       service: stalwart-admin
       middlewares: [mail-cors]
       tls: {}
     bulwark:
       entryPoints: [websecure]
-      rule: "Host(`webmail.kaiteki.my`)"
+      rule: "Host(`webmail.blueprintdigital.my`) || Host(`webmail.kaiteki.my`)"
       service: bulwark
       tls: {}
   services:

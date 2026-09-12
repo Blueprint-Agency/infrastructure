@@ -16,14 +16,17 @@ Read-only. It issues JMAP reads and nothing else.
 ---------------------------------------------------------------------------------------
 WHY THIS EXISTS, AND WHY IT IS JMAP
 
-Stalwart v0.16.16 has no scriptable admin surface at all. `/api/principal` and every
-sibling management path 404; the OAuth metadata advertises only mail/contacts/calendars
-scopes, so there is no admin scope to ask for; `/account/` is a self-service page whose
-bundle contains exactly two routes; and `--console` wants an argument this build does not
-document. "Read it out of the admin UI" is not an available answer on this platform.
+Stalwart v0.16.16 has no admin UI. The REST `/api/principal` of older versions is gone and
+`/account/` is a self-service page, so "read it out of the admin UI" is not an available
+answer on this platform. Its management API is JMAP with an `x:` prefix (`x:Account/get`,
+see the stalwart stack README) -- this script predates that discovery and uses the RFC
+`Principal/get` instead, which works just as well for this purpose.
 
-What IS available: the admin mailbox can run `Principal/get`, which enumerates every
-account, and can then query other accounts' mail. That is the whole mechanism.
+Any mailbox can run `Principal/get`, which enumerates every account; only an ADMIN-role
+mailbox can then query other accounts' mail. That is the whole mechanism. Since 2026-09-12
+the admin on bpvps1 is admin@blueprintdigital.my (INVENTORY_ACCOUNT in the domain conf);
+run as admin@kaiteki.my the script lists everyone, sizes its own mailbox, and then dies on
+`forbidden` for the second account -- loud, not silent, which is the right failure.
 
 Sizes are summed from each message's `size` rather than read from `Quota/get`, because
 Quota/get returns an empty list here -- no quotas are configured, so the server holds no
@@ -149,12 +152,17 @@ class Jmap:
 def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("domain")
-    ap.add_argument("--account", help="admin mailbox (default: first DEFAULT_ACCOUNTS entry)")
+    ap.add_argument("--account", help="admin mailbox (default: INVENTORY_ACCOUNT from the "
+                    "domain conf, else its first DEFAULT_ACCOUNTS entry)")
     ap.add_argument("--out", help="write JSON here instead of stdout")
     args = ap.parse_args()
 
     conf = read_conf(args.domain)
-    account = args.account or conf["DEFAULT_ACCOUNTS"].split()[0]
+    # INVENTORY_ACCOUNT is the platform admin; DEFAULT_ACCOUNTS is a mailbox ON this domain
+    # for verify-mail's login test. They stopped being the same address on 2026-09-12 when
+    # the Admin role moved off admin@kaiteki.my.
+    account = (args.account or conf.get("INVENTORY_ACCOUNT")
+               or conf["DEFAULT_ACCOUNTS"].split()[0])
     api = Jmap(conf["MAIL_HOST"], account, password_for(account))
 
     # Principal/get needs a concrete accountId; a null one is a 400 on this build. The
@@ -168,6 +176,13 @@ def main():
                      [["Principal/get", {"accountId": own, "ids": None}, "0"]]).get("list")
     if not principals:
         die("Principal/get returned no accounts -- is this the admin mailbox?")
+    # Belt and braces: a directory that really does hold one account would also come back
+    # this way, and then the "inventory" is the caller looking in a mirror. Refuse rather
+    # than write a plausible-looking one-line file. (A non-admin on a multi-account server
+    # gets past this and dies on `forbidden` at the first foreign mailbox instead.)
+    if len(principals) == 1 and principals[0].get("id") == own:
+        die(f"{account} can only see itself -- pass --account <platform admin> or set "
+            "INVENTORY_ACCOUNT in the domain conf.")
 
     rows = []
     for principal in principals:

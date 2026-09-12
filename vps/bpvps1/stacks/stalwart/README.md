@@ -30,8 +30,8 @@ Stack dir on VPS: `/root/stacks/stalwart/`. Mail data in the `stalwart-data` vol
     `../traefik/dynamic/stalwart.yml`. Stalwart's own "Permissive CORS" is left **OFF**: it only
     emits `*` (which browsers reject for credentialed / "Remember me" requests) and it doesn't
     cover the `/.well-known/jmap` discovery redirect.
-  - Stalwart must trust the proxy: **Settings → Network → HTTP Server → "Obtain remote IP from
-    Forwarded header" = ON**, plus **Settings → Security → Allowed IPs → `172.16.0.0/16`**. Without
+  - Stalwart must trust the proxy: `x:Http.useXForwarded = true`, plus an `x:AllowedIp` entry
+    for **`172.16.0.0/12`** (Docker's default pool; see "Configuring this build"). Without
     this, Stalwart's fail2ban sees every request as coming from Traefik's container IP, and a single
     bot scan for `*/wp-*`/`*.php*` (HTTP "banned paths") bans the proxy → all mail web UIs return 502.
 
@@ -107,20 +107,25 @@ PTR (Hostinger hPanel): `187.127.122.41` → **`mail.kaiteki.my`** (FCrDNS / del
 - **`config.json` is persistence-critical** — the storage pointer Stalwart reads on boot
   (`/etc/stalwart/config.json`), bind-mounted from `./config.json`. Without it a container
   recreate wipes Stalwart back into the setup wizard (mail data survives, config lost).
-- **Most config lives in the store**, set via the admin UI. The v1.0 management REST API is
-  OAuth-only and not the documented `/api/settings*` path — there's no easy scripting; use the UI.
-- Stalwart settings the webmail depends on (all via the admin UI): **Default Hostname =
-  mail.kaiteki.my**, the **TLS File** cert refs, **"Obtain remote IP from Forwarded header" = ON**,
-  and an **Allowed IPs** entry `172.16.0.0/16`. CORS is handled by **Traefik** (Stalwart Permissive
-  CORS stays OFF).
+- **Most config lives in the store**, written over JMAP `x:` methods — there is no admin UI on
+  this build. See "Configuring this build" below for the exact calls.
+- Stalwart settings the webmail depends on, all already set in the store: **`defaultHostname =
+  mail.kaiteki.my`**, the **TLS File** cert refs, **`x:Http.useXForwarded = true`**, and an
+  **`x:AllowedIp`** entry `172.16.0.0/12`. CORS is handled by **Traefik** (Stalwart
+  `usePermissiveCors` stays `false`).
+- ⚠️ **The default hostname is a public-DNS commitment.** Stalwart builds the absolute JMAP
+  session URLs from it and ignores the request's `Host` header, and Bulwark serves its JMAP host
+  to the *browser*. Changing it to a name whose public A record is another machine sends every
+  webmail user to that machine, with a valid certificate and no error.
+  See [`docs/mail/hostname-cutover-constraint.md`](../../../../docs/mail/hostname-cutover-constraint.md).
 - ⚠️ **fail2ban behind a reverse proxy** — Stalwart bans by source IP; behind Traefik every request
   looks like it comes from Traefik's container IP, so a bot scan for an HTTP "banned path"
   (`*/wp-*`, `*.php*`, …) bans the proxy and **every mail web UI 502s**. The two settings above fix
   it: XFF trust makes bans use the real client IP, and the Allowed-IPs entry exempts the proxy.
-  > ⚠️ `172.16.0.0/16` is only correct **here**, because this host's `stalwart_mailnet` happens
-  > to be `172.16.3.0/24`. Don't copy that value to another host — bpvps2's mailnet is
-  > `172.21.0.0/16`, outside the /16. Prefer **`172.16.0.0/12`**, which covers Docker's whole
-  > default pool. Check with `docker network inspect stalwart_mailnet` before trusting it.
+  > The entry was `172.16.0.0/16` until 2026-09-12, which was only correct **here** because this
+  > host's `stalwart_mailnet` happens to be `172.16.3.0/24` — bpvps2's mailnet is `172.21.0.0/16`,
+  > outside it. It is now **`172.16.0.0/12`**, Docker's whole default pool, which is the value
+  > to use on any host. Check with `docker network inspect stalwart_mailnet` before trusting it.
   > Bans persist in the store — restarting Stalwart does **not** clear them.
 - Old DKIM verifiers (e.g. port25) can't evaluate Ed25519 → harmless `permerror`; RSA passes.
 - **DNSBLs only work through the local `unbound` container** (added 2026-08-27). Spamhaus/URIBL
@@ -210,14 +215,84 @@ rm -rf /tmp/stexport; docker volume rm stalwart-restoretest
 
 ### Listing accounts
 
-There is **no admin API and no admin UI that lists accounts** on v0.16.16 — `/api/principal`
-and every sibling 404 (through Traefik and directly on the container), the OAuth metadata
-offers only `mail`/`contacts`/`calendars` scopes so there is no admin scope to ask for, and
-`/account/` is a self-service page whose JS bundle holds exactly two routes. Any instruction
-to "read it out of the admin UI" is describing something this build does not have.
+There is **no admin UI that lists accounts** on v0.16.16 — `/account/` is a self-service page,
+and the REST `/api/principal` of older versions is gone. Any instruction to "read it out of
+the admin UI" is describing something this build does not have.
 
-**JMAP does it instead.** The admin mailbox can run `Principal/get`, which returns every
-account on the server, and can query other accounts' mail. That is what
-`scripts/mail-inventory.py <domain>` is built on — see `docs/mail/`. It is also why
-`verify-mail.sh` takes the accounts to test as arguments: that predates knowing this worked,
-and "can this real person sign in" is still the better test.
+**JMAP does it instead**, two ways. `x:Account/get` (next section) is the management view:
+every account with its role and domain, and needs the **Admin** role. The RFC `Principal/get`
+returns every account to any mailbox; reading those accounts' *mail* is what needs Admin,
+and that is what `scripts/mail-inventory.py <domain>` does (see `docs/mail/`). Since
+2026-09-12 the Admin is `admin@blueprintdigital.my`, not `admin@kaiteki.my`. It is also why
+`verify-mail.sh` takes the accounts to test as arguments: "can this real person sign in" is
+the better test.
+
+### Configuring this build — the management API is JMAP with an `x:` prefix
+
+**v0.16 deleted the REST management API.** Every setting now lives in the datastore as a JMAP
+object, reached through the ordinary `/jmap` endpoint. `config.json` on disk describes only the
+datastore; there is no TOML to edit (`/opt/stalwart/etc/config.toml` exists and is **empty**).
+The "admin UI → Settings → …" phrasing in older notes describes the webadmin this build no
+longer ships: `/admin/` and `/account/` serve the same self-service "Portal" bundle.
+
+**The methods are `x:<Object>/{get,set,query}`**, and `using` must include
+`urn:stalwart:jmap`. That prefix is the whole trick — `Domain/get` is `unknownMethod`,
+`x:Domain/get` works. (Source: `crates/jmap-proto/src/request/method.rs` at tag v0.16.16.
+Confirmed live here 2026-09-12.) Basic auth as any account with the **Admin** role, or as the
+env recovery admin (`STALWART_RECOVERY_ADMIN`) over loopback `:8090`.
+
+```bash
+# On the host. Read the three domains, the hostname, and the proxy setting in one call.
+cd /root/stacks/stalwart
+P=$(grep -E '^STALWART_RECOVERY_PASS=' .env | cut -d= -f2- | tr -d '"'"'"'\r')
+curl -s -u "admin:$P" -H 'Content-Type: application/json' http://127.0.0.1:8090/jmap -d '{
+  "using":["urn:ietf:params:jmap:core","urn:stalwart:jmap"],
+  "methodCalls":[
+    ["x:Domain/get",{"properties":["id","name","isEnabled"]},"d"],
+    ["x:SystemSettings/get",{"ids":["singleton"]},"s"],
+    ["x:Http/get",{"ids":["singleton"]},"h"],
+    ["x:AllowedIp/get",{},"a"]]}'
+```
+
+The objects this stack has needed so far, with the exact shapes that worked:
+
+| Need | Call |
+|---|---|
+| Add a domain (DKIM keys are generated automatically on create) | `x:Domain/set` `{"create":{"n0":{"name":"example.my","isEnabled":true,"dkimManagement":{"@type":"Automatic","algorithms":{"Dkim1Ed25519Sha256":true,"Dkim1RsaSha256":true},"selectorTemplate":"v{version}-{algorithm}-{date-%Y%m%d}","rotateAfter":7776000000,"retireAfter":604800000,"deleteAfter":2592000000}}}}` |
+| Read DKIM selectors + public keys | `x:DkimSignature/get` `{"properties":["selector","domainId","publicKey","stage"]}` — or read the domain's `dnsZoneFile`, which is the ready-to-paste TXT |
+| Force a DKIM rotation | `x:Task/set` `{"create":{"t":{"@type":"DkimManagement","domainId":"<id>"}}}` |
+| Create an account | `x:Account/set` `{"create":{"n0":{"@type":"User","name":"alice","domainId":"<id>","roles":{"@type":"User"},"credentials":{"0":{"@type":"Password","secret":"…"}}}}}` — `emailAddress` is derived as `name@domain` |
+| Grant / remove the administrator role | `x:Account/set` `{"update":{"<id>":{"roles":{"@type":"Admin"}}}}` — variants are `User`, `Admin`, `Custom` |
+| Default hostname | `x:SystemSettings/set` `{"update":{"singleton":{"defaultHostname":"…"}}}` — ⚠️ read the hostname warning above first |
+| Trust `X-Forwarded-For` | `x:Http/set` `{"update":{"singleton":{"useXForwarded":true}}}` |
+| Allowed (never-banned) networks | `x:AllowedIp/set` `{"create":{"n0":{"address":"172.16.0.0/12","reason":"…"}}}` — `address` is immutable: to change one, create the new entry and `destroy` the old id |
+
+Singletons are addressed by the literal id `"singleton"`. Tagged unions use `"@type"`. Lists
+are objects keyed `"0"`, `"1"`, …. `query` filters are flat (`{"filter":{"name":"example.my"}}`)
+and only indexed properties filter. There is no `changes`/`queryChanges` for `x:` objects.
+
+> The full property reference is the server's own schema:
+> `GET /api/schema/<hash>` with Basic auth, hash at `resources/schema/schema.json.sha256` in the
+> source tree for the running tag. Upstream also publishes `stalwart-cli`
+> (`github.com/stalwartlabs/cli`, a separate repo — it is **not** a release asset of the server),
+> which speaks exactly this protocol and derives its commands from that schema. Not yet used here.
+
+> `--console` is a **raw key-value store debugger** (`scan`/`get`/`put`/`delete` on serialized
+> blobs), needs the server stopped to take the RocksDB lock, and knows nothing about domains
+> or settings. It is not an admin CLI. Its "Missing value for argument" response to every
+> input is why it was written off; the answer was never there anyway.
+
+**State of this instance after 2026-09-12 (issue #8):**
+
+| Object | Value |
+|---|---|
+| Domains | `kaiteki.my` (id `b`), `blueprintdigital.my` (`c`), `reservetoday.app` (`d`) — all with automatic DKIM |
+| Administrator | **`admin@blueprintdigital.my`** (id `t`). `admin@kaiteki.my` (id `b`) is a plain `User` mailbox again. The recovery admin in `.env` is unchanged. |
+| `defaultHostname` | still **`mail.kaiteki.my`** — deliberately, see the hostname warning |
+| `useXForwarded` | `true` (was already) |
+| Allowed IPs | `172.16.0.0/12` (Docker default pool; replaced the `/16`), `60.54.118.137` (Kaiteki office) |
+
+`scripts/mail-inventory.py` and anything else that reads other people's mailboxes must now
+authenticate as `admin@blueprintdigital.my` (`INVENTORY_ACCOUNT` in the domain conf,
+`MAIL_PASSWORD_ADMIN_BLUEPRINTDIGITAL_MY` in `.env`). The Kaiteki admin can still list
+accounts, but every read of another mailbox is `forbidden`.

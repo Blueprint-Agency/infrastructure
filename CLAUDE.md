@@ -338,9 +338,26 @@ never a new script. The parsing half is `scripts/lib/mail-checks.sh` and is cove
 account, its message count and its bytes, so a migration can be proved invisible by diffing a
 before against an after. Snapshots live in `docs/mail/`.
 
-> ⚠️ **Stalwart v0.16.16 has no admin API and no admin UI that lists accounts** — `/api/*`
-> management paths all 404, the OAuth metadata offers no admin scope, and `/account/` is a
-> self-service page. A ticket that says "capture it from the admin UI" is describing something
-> that does not exist. **JMAP `Principal/get` as the admin mailbox does enumerate every
-> account**, and that is what `mail-inventory.py` uses. Sizes are summed per message, not read
-> from `Quota/get`, which returns empty here because no quotas are set.
+> ⚠️ **Stalwart v0.16.16 has no admin UI, and its management API is JMAP with an `x:` prefix.**
+> The REST `/api/*` management paths of older versions all 404, and `/account/` is a
+> self-service page — a ticket that says "set it in the admin UI" is describing a screen this
+> build does not have. The real surface is `x:Domain/set`, `x:Account/set`,
+> `x:SystemSettings/set`, `x:Http/set`, `x:AllowedIp/set` and friends on `/jmap`, with
+> `urn:stalwart:jmap` in `using`, as an **Admin**-role account or the env recovery admin over
+> loopback. Exact request shapes: `vps/bpvps1/stacks/stalwart/README.md`, "Configuring this
+> build". Without the `x:` prefix every one of those is `unknownMethod`, which is what made it
+> look like no API existed. **The Admin role on bpvps1 is `admin@blueprintdigital.my`** since
+> 2026-09-12; `admin@kaiteki.my` is an ordinary mailbox. `mail-inventory.py` enumerates via
+> `Principal/get`, which also needs Admin. Sizes are summed per message, not read from
+> `Quota/get`, which returns empty here because no quotas are set.
+
+> ⚠️ **Stalwart's default hostname is a public-DNS commitment.** The JMAP session's absolute
+> URLs come from it and ignore the request `Host`, and Bulwark hands its JMAP host to the
+> *browser*. Set it to a name whose A record is another machine and every webmail user is sent
+> there, under a valid cert, with no error. `docs/mail/hostname-cutover-constraint.md`.
+
+> ⚠️ **Traefik v3.3 `Host()` takes ONE name.** `Host(`a`, `b`)` passes YAML and the file
+> provider, then fails at router build with "unexpected number of parameters", and the router
+> silently ceases to exist — every name on it 404s. Write `Host(`a`) || Host(`b`)`. This took
+> the Kaiteki web UIs down for ~13 minutes on 2026-09-12; the only symptom was in
+> `docker logs traefik`.

@@ -23,18 +23,20 @@ messages. Plus a `totals` block.
 
 ## Why this is JMAP and not the admin UI
 
-Stalwart v0.16.16 has **no scriptable admin surface and no admin UI that lists accounts**.
-`/api/principal` and every sibling management path 404, both through Traefik and directly on
-the container; the OAuth metadata advertises only `mail`, `contacts` and `calendars` scopes,
-so there is no admin scope to request; `/account/` is a self-service page whose JS bundle
-contains exactly two routes; and `--console` demands an argument this build does not
-document. Tickets that say "read it out of the admin UI" are describing something that does
+Stalwart v0.16.16 has **no admin UI that lists accounts**. The REST `/api/principal` of older
+versions is gone, `/account/` is a self-service page, and `--console` is a raw key-value
+debugger. Tickets that say "read it out of the admin UI" are describing something that does
 not exist here.
 
-What does work: the admin mailbox can run JMAP `Principal/get`, which enumerates every
-account on the server, and can then query other accounts' mail. Sizes are summed from each
-message rather than read from `Quota/get`, because no quotas are configured on this instance
-and `Quota/get` accordingly returns an empty list for every account.
+What does work is JMAP. The management API is `x:Account/get` and friends (JMAP methods with
+an `x:` prefix and `urn:stalwart:jmap` in `using` — see the stalwart stack README,
+"Configuring this build"). This script predates that discovery and uses the RFC
+`Principal/get` instead, which enumerates every account for any mailbox; reading those
+accounts' mail is what needs the **Admin** role. Since 2026-09-12 that is
+`admin@blueprintdigital.my` (`INVENTORY_ACCOUNT` in the domain conf), not
+`admin@kaiteki.my`, which now dies on `forbidden` at the first foreign mailbox. Sizes are summed from
+each message rather than read from `Quota/get`, because no quotas are configured on this
+instance and `Quota/get` accordingly returns an empty list for every account.
 
 ## Captures
 
