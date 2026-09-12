@@ -70,8 +70,8 @@ hostname needs no CAA change.
 
 ## Mail records on `reservetoday.app` — published 2026-09-12 (#10)
 
-The domain receives mail on the shared platform host since 2026-09-12. Five records, all
-added with `vercel dns add reservetoday.app … --scope blueprintdigitalmy`:
+The domain receives mail on the shared platform host since 2026-09-12. Five records — four
+added, and `_dmarc` repointed — all via `vercel dns add reservetoday.app … --scope blueprintdigitalmy`:
 
 ```
 @                                MX   10 mail.blueprintdigital.my

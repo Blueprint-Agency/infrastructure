@@ -134,8 +134,10 @@ read **`mail.blueprintdigital.my`**, the name Stalwart announces at SMTP greetin
 (FCrDNS / deliverability). ⚠️ **Still `mail.kaiteki.my` as of the #9 cutover** — the hPanel
 change is pending; FCrDNS still resolves, so deliverability is unaffected until it is done.
 
-> **Anti-spoof: SPF `-all` + DMARC `p=reject` (hardfail) — do not loosen.** `mx` (this VPS)
-> is the *only* authorized sender, so hardfail is safe. Set 2026-07-30 after a forged
+> **Anti-spoof on `kaiteki.my` and `blueprintdigital.my`: SPF `-all` + DMARC `p=reject`
+> (hardfail) — do not loosen.** On those two zones `mx` (this VPS) is the *only* authorized
+> sender, so hardfail is safe; `reservetoday.app` is the exception above, because Clerk also
+> sends for it. Set 2026-07-30 after a forged
 > `support@kaiteki.my` phish (a non-existent address; SMTP lets anyone forge From) reached
 > `hr@`'s Inbox: the old `~all`/`p=quarantine` was a softfail so Stalwart accepted it as ham.
 > If you ever add a 3rd-party sender (CRM, marketing), add its `include:` to SPF **before** it
