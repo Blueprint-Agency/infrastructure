@@ -1,0 +1,29 @@
+# What bpvps1 backs up -- nothing yet. The backup stack lands on this host in #28 (mail in
+# #29); until then this file only accounts for every named volume, so none can be missed
+# when it does. `backup` is in this host's `exclude` in vps/hosts.json until a compose file
+# sits beside this one.
+#
+# Format and kinds: vps/bpvps2/stacks/backup/targets.yml. Checked in CI by
+# vps/shared/check-backup-targets.py.
+
+targets: []
+
+skip:
+  - volume: stalwart_stalwart-data
+    reason: >-
+      NOT BACKED UP -- all mail for all three domains. An embedded store: reading it live is
+      not a backup. Its method is decided in #29.
+  - volume: wordpress_wp-db-data
+    reason: NOT BACKED UP yet -- the WordPress database, to be dumped as a mysql target in #28.
+  - volume: stalwart_bulwark-settings
+    reason: NOT BACKED UP yet -- webmail branding and settings, a volume target in #28.
+  - volume: stalwart_bulwark-admin
+    reason: NOT BACKED UP yet -- webmail admin state, a volume target in #28.
+  - volume: stalwart_bulwark-admin-state
+    reason: NOT BACKED UP yet -- webmail admin state, a volume target in #28.
+  - volume: stalwart_bulwark-telemetry
+    reason: >-
+      Bulwark's own telemetry; not in #4's data table. #28 to confirm it holds nothing
+      worth restoring.
+  - volume: infra_traefik-letsencrypt
+    reason: NOT BACKED UP yet -- issued certificates, re-issued if lost. Captured in #28.

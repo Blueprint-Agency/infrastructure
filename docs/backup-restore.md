@@ -3,10 +3,11 @@
 Nightly, encrypted, off-site snapshots, and the one command that proves they restore.
 
 **Coverage today: `booking-staging` on bpvps2 only** (#26) — the instance that holds every
-studio's real member and booking data. The rest of #4 is ticketed: declarative targets,
-heartbeat and healthcheck (#27), the other four hosts (#28), mail (#29), and restore-to-live,
-the monthly drill and hypervisor snapshots (#30). Until those land, nothing else on any host is
-backed up.
+studio's real member and booking data. What each host backs up is declared in
+`vps/<host>/stacks/backup/targets.yml` (#27); on the other four hosts that file is, for now,
+nothing but skips, each saying which ticket closes it — the other four hosts (#28), mail (#29),
+and restore-to-live, the monthly drill and hypervisor snapshots (#30). Until those land,
+nothing else on any host is backed up.
 
 ## Where snapshots are
 
@@ -18,25 +19,107 @@ backed up.
 | Encryption | client-side, restic, with that host's `RESTIC_PASSWORD`. R2 only ever holds ciphertext |
 | Credential | an R2 API token with Object Read & Write on **this bucket only** |
 | Schedule | 03:30 Asia/Kuala_Lumpur, `crontab` in the `backup` stack |
-| Retention | 7 daily / 4 weekly / 6 monthly per instance, `forget --prune` only after that night's snapshot succeeded |
+| Retention | 7 daily / 4 weekly / 6 monthly per target, `forget --prune` only after that target's snapshot succeeded |
 
-Each snapshot holds `/scratch/booking-<env>/<db>.dump` (`pg_dump -Fc`) and
-`/scratch/booking-<env>/globals.sql` (roles — `pg_dump` does not carry them, and without
-`booking_app` a restore fails on every GRANT and policy). Snapshots are tagged `booking-<env>`
-and taken with `--host bpvps2`.
+Every target is its own snapshot, tagged with the target's name and taken with `--host <host>`:
 
-> **Tags and paths are keyed on `ENV_NAME`, exactly like the booking compose.** `booking-staging`
-> and `booking-prod` never share a tag, a scratch path or a retention group. Adding prod is
-> `BACKUP_ENVS: staging prod` in the compose file, nothing more.
+| Kind | Snapshot holds |
+|---|---|
+| `postgres` | `/scratch/<target>/<database>.dump` (`pg_dump -Fc`) and `/scratch/<target>/globals.sql` (roles — `pg_dump` does not carry them, and without `booking_app` a restore fails on every GRANT and policy) |
+| `mysql` | `/scratch/<target>/<database>.sql` (`mariadb-dump --single-transaction --routines --triggers --events --databases`) |
+| `volume` | `/volumes/<volume>/…`, the volume's files, read through a read-only mount |
 
-> **The dump runs as the database's owner role (`POSTGRES_USER`), never as `booking_app`.**
-> `booking_app` is subject to Row-Level Security, and `pg_dump` as that role dumps every table
-> with no tenant's rows in it and exits 0. `backup.sh` checks the role is superuser or
-> `BYPASSRLS` and refuses otherwise.
+> **Target names are the snapshot tags and scratch paths**, and CI refuses two targets with one
+> name. `booking-staging` and `booking-prod` can therefore never share a tag, a scratch path or
+> a retention group — on the host where one of them holds the real data.
 
-> `pg_dump` runs **inside** the database container (`docker exec`), so the client is the
-> server's own build and a major-version mismatch cannot happen. The restore drill starts its
-> scratch server from the live container's image for the same reason.
+> **The dump runs as the database's owner role, never as `booking_app`.** `booking_app` is
+> subject to Row-Level Security, and `pg_dump` as that role dumps every table with no tenant's
+> rows in it and exits 0. `backup.sh` checks the declared role is a superuser and refuses
+> otherwise.
+
+> Dumps run **inside** the database container (`docker exec`), so the client is the server's
+> own build and a major-version mismatch cannot happen. The restore drill starts its scratch
+> server from the live container's image for the same reason.
+
+## What gets backed up: `targets.yml`
+
+One file per host, read by the job at every run. Adding a database or a volume is a line there
+plus a deploy — never a new script, never a change to `deploy-infra.yml`.
+
+```yaml
+targets:
+  - name: booking-staging      # snapshot tag; lowercase, digits, -
+    kind: postgres             # postgres | mysql | volume
+    container: booking-db-staging
+    database: yoga-sadhana
+    role: postgres             # the OWNER; superuser, or RLS silently empties the dump
+    floor: 280K                # bytes, or K / M / G
+  - name: traefik-certs
+    kind: volume
+    volume: infra_traefik-letsencrypt   # the name `docker volume ls` shows
+    floor: 4K
+
+skip:
+  - volume: booking_prod_pgdata
+    reason: why it is safe not to back this up
+```
+
+**CI checks it** (`vps/shared/check-backup-targets.py`, run by
+`test_check_backup_targets.py` on every deploy): every host in `vps/hosts.json` has the file,
+and every named volume in that host's compose files is backed up — by a `volume` target, or by
+a `postgres`/`mysql` target dumping the container that mounts it — or skipped **with a reason**.
+It also fails on a declaration that no compose file matches any more. A new stack with a volume
+therefore cannot ship until someone decides about that volume.
+
+> Volume names are the real Docker names: `name:` if set, the bare key if `external`, otherwise
+> `<stack dir>_<key>`, once per fanout destination with its own `ENV_NAME`. The check prints the
+> name it expects.
+
+> On a host with no backup compose yet, `targets: []` plus skips is allowed, and `backup` sits
+> in that host's `exclude` in `vps/hosts.json` so CI does not try to start a stack that has only
+> a targets file. Remove it from `exclude` when #28 adds the compose.
+
+### The floor
+
+Every target has one. A dump or volume **smaller than its floor fails that target and writes no
+heartbeat** — so an empty or truncated database raises the same alarm as a backup that never
+ran. Set it above what an *empty* instance of the same thing measures:
+
+| Target | Measured 2026-09-13 | Floor |
+|---|---|---|
+| booking-staging | live 327,605 B · schema only 255,569 B · booking-prod (seed data) 282,750 B | `280K` (286,720 B) |
+
+## Did it work? Heartbeat, healthcheck, exit code
+
+**Heartbeat.** After each target's snapshot *and* prune succeed, the job rewrites
+`backup.prom` in the monitoring textfile volume (`monitoring_textfile`, contract in
+[`textfile-metrics.md`](textfile-metrics.md)):
+
+```
+backup_last_success_timestamp_seconds{target="booking-staging"} 1789311303
+backup_last_size_bytes{target="booking-staging"} 327605
+```
+
+A failed target keeps its previous timestamp, so it goes stale; the dead-man's switch is an
+ordinary staleness alert on that metric (older than 26 h), not a second alerting vendor.
+
+**Healthcheck.** `docker ps` shows `backup` **unhealthy** when any declared target's last
+success is older than `BACKUP_MAX_AGE` (90,000 s — a day, plus an hour for tonight's run to
+finish), or has never succeeded. It reads the same `backup.prom`, so `docker ps` and the alert
+cannot disagree. A freshly created container is unhealthy until its first run — after a
+first deploy, run `docker exec backup /app/bin/backup.sh` rather than wait for 03:30. (The
+healthcheck's 25 h and the alert's 26 h differ on purpose: `docker ps` is looked at by a
+human, the alert pages one.)
+
+**Exit code** of `backup.sh`, the same contract as `scripts/verify-mail.sh`:
+
+| | |
+|---|---|
+| `0` | every target green |
+| `1` | at least one target failed (the others still ran) |
+| `2` | the run could not start — bad `targets.yml`, unknown target name, repository unreachable |
+| `3` | green, but targets were left out: `backup.sh <target>` ran a subset |
 
 ## Secrets — two homes, neither is the host
 
@@ -64,21 +147,27 @@ All run on the host (`ssh bp-bpvps2`), as `deploy`.
 docker exec backup restic snapshots
 
 # Take a snapshot now -- before a production migration or an import
-docker exec backup /app/bin/backup.sh
+docker exec backup /app/bin/backup.sh                    # every target, exit 0
+docker exec backup /app/bin/backup.sh booking-staging    # just this one, exit 3 when green
+
+# Is every target fresh?
+docker exec backup /app/bin/healthcheck.sh
+docker exec backup cat /textfile/backup.prom
 
 # Restore drill: latest snapshot -> throwaway Postgres -> row counts vs live
-docker exec backup /app/bin/restore-drill.sh staging
-docker exec backup /app/bin/restore-drill.sh staging <snapshot-id>
+docker exec backup /app/bin/restore-drill.sh booking-staging
+docker exec backup /app/bin/restore-drill.sh booking-staging <snapshot-id>
 
 # Last night's run
 docker logs backup --since 24h
 ```
 
-The drill compares `COUNT(*)` on `tenants`, `clients`, `bookings`, `client_packages` and
-`stripe_payments` (the payments table), and exits non-zero on any difference. Its scratch
-container is `restore-drill-booking-<env>`, has **no network**, and is removed on exit. Rows
-written since the snapshot read as a mismatch — for an exact comparison, run `backup.sh`
-immediately before.
+The drill takes a `postgres` target's name and reads its container, database and role from
+`targets.yml`. It compares `COUNT(*)` on `tenants`, `clients`, `bookings`, `client_packages` and
+`stripe_payments` (the payments table; override with `-e DRILL_TABLES=…`), and exits non-zero
+on any difference. Its scratch container is `restore-drill-<target>`, has **no network**, and is
+removed on exit. Rows written since the snapshot read as a mismatch — for an exact comparison,
+run `backup.sh` immediately before.
 
 ## Getting a dump out by hand
 

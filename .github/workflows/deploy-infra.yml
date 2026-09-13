@@ -80,10 +80,19 @@ jobs:
       - name: Self-check the mail certificate name list
         run: bash scripts/test_renew_cert.sh
 
-      # The pure half of bpvps2's backup job: staging/prod tag separation, the RLS dump-role
-      # guard, and the restore drill's row-count comparison.
+      # The pure half of the backup job: the targets file parser, the floor-size guard, the
+      # heartbeat metric, the healthcheck, the RLS dump-role guard and the restore drill's
+      # row-count comparison. Needs yq, which the runner image ships.
       - name: Self-check the backup job helpers
         run: bash scripts/test_backup_lib.sh
+
+      # Every host in vps/hosts.json has a backup targets.yml, and every named volume in its
+      # compose files is backed up or skipped with a reason. This is what stops backup
+      # coverage from rotting as stacks change. PyYAML is python3-yaml on the runner.
+      - name: Check backup targets cover every volume
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
+          python3 vps/shared/test_check_backup_targets.py
 
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4

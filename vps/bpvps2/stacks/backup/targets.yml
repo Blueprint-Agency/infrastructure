@@ -1,0 +1,48 @@
+# What bpvps2 backs up. Read by the backup job at every run (bin/backup.sh), so adding a
+# database or a volume is a line here plus a deploy -- never a new script.
+#
+# Kinds:
+#   postgres  container, database, role   pg_dump -Fc + globals, run INSIDE the container
+#   mysql     container, database, role   mariadb-dump / mysqldump, run inside the container
+#   volume    volume                      a named Docker volume, mounted read-only, read as files
+#
+# Every target has a `floor`: a dump or volume smaller than that fails the run and writes no
+# heartbeat, so an empty database raises the same alarm as a missing backup. Bytes, or
+# K / M / G (binary). Set it above what an EMPTY instance of the same thing measures.
+#
+# Every named volume in this host's compose files is either backed up here -- directly, or
+# because a postgres/mysql target dumps the container that mounts it -- or listed under
+# `skip:` with a reason. vps/shared/check-backup-targets.py enforces that in CI.
+#
+# Runbook: docs/backup-restore.md.
+
+targets:
+  # Every studio's real member and booking data. Covers booking_staging_pgdata.
+  # role must be the owner (superuser): as booking_app, RLS makes pg_dump omit every
+  # tenant's rows and still exit 0. The job checks.
+  #
+  # Floor, measured 2026-09-13: live dump 327,605 B; the same schema with no data
+  # (--schema-only) 255,569 B; booking-prod, which holds only seed data, 282,750 B.
+  # 280K (286,720 B) sits above both of those and below live.
+  - name: booking-staging
+    kind: postgres
+    container: booking-db-staging
+    database: yoga-sadhana
+    role: postgres
+    floor: 280K
+
+skip:
+  - volume: booking_prod_pgdata
+    reason: >-
+      booking-prod is fresh -- seed data only, no studio on it yet (#26 backed up staging
+      alone for this reason). Add a postgres target here before the first studio moves to prod.
+  - volume: infra_traefik-letsencrypt
+    reason: >-
+      Traefik's issued certificates, which it re-issues on its own if lost. Captured on
+      all five hosts in #28.
+  - volume: backup_restic_cache
+    reason: restic's local index cache; rebuilt from the repository in R2 on the next run.
+  - volume: monitoring_textfile
+    reason: >-
+      Heartbeat metrics. backup.prom is rewritten by every successful run; losing it reads
+      as stale, which alerts -- the safe direction.

@@ -1,14 +1,18 @@
 # backup — nightly encrypted, deduplicated snapshots of bpvps2's databases to R2.
 #
+# WHAT is backed up is not in this file: it is targets.yml, next to it, read at every run.
+# Adding a database or a volume is a line there plus a deploy.
+#
 # Private bucket `blueprint-backups` in the Blueprint Cloudflare account; this host's
 # restic repository is its `bpvps2/` prefix. restic encrypts client-side with
 # RESTIC_PASSWORD, which the bucket never sees. Lose that passphrase and every snapshot
 # in the repository is unreadable — it lives in CI and in the team password manager.
 #
-# Runbook (list, restore, drill): docs/backup-restore.md.
+# Runbook (list, restore, drill, heartbeat): docs/backup-restore.md.
 #
 # No host port, no Traefik, no network of its own: it only needs outbound 443 to R2 and
-# the Docker socket, through which it runs pg_dump inside each database container.
+# the Docker socket, through which it runs pg_dump inside each database container and
+# mounts each volume target read-only into a throwaway container. Nothing needs host root.
 services:
   backup:
     build: .
@@ -21,8 +25,15 @@ services:
     environment:
       TZ: Asia/Kuala_Lumpur
       BACKUP_HOST: bpvps2
-      # booking ENV_NAMEs to back up. booking-staging holds every studio's real data.
-      BACKUP_ENVS: staging
+      BACKUP_TARGETS: /app/targets.yml
+      # The throwaway containers that read volume targets run this same image.
+      BACKUP_IMAGE: blueprint-backup:local
+      # Heartbeat: backup.prom, read by the monitoring agent (#24). Contract:
+      # docs/textfile-metrics.md.
+      TEXTFILE_DIR: /textfile
+      # Healthcheck limit: a day, plus an hour for tonight's run to finish before the
+      # previous success counts as missed.
+      BACKUP_MAX_AGE: "90000"
       # From ci/env.ci, rendered by CI; a blank one fails the deploy.
       RESTIC_REPOSITORY: s3:https://${R2_BACKUP_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BACKUP_BUCKET}/bpvps2
       RESTIC_PASSWORD: ${RESTIC_PASSWORD}
@@ -30,10 +41,23 @@ services:
       AWS_SECRET_ACCESS_KEY: ${R2_BACKUP_SECRET_ACCESS_KEY}
       AWS_DEFAULT_REGION: auto
       RESTIC_CACHE_DIR: /cache
+      RESTIC_CACHE_VOLUME: backup_restic_cache
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./targets.yml:/app/targets.yml:ro
       - backup_cache:/cache
+      - textfile:/textfile
+    healthcheck:
+      test: ["CMD", "/app/bin/healthcheck.sh"]
+      interval: 5m
+      timeout: 30s
+      retries: 1
+      start_period: 1m
 
 volumes:
   backup_cache:
     name: backup_restic_cache
+  # Shared with the monitoring stack, so it belongs to neither: created by post-sync.sh.
+  textfile:
+    external: true
+    name: monitoring_textfile

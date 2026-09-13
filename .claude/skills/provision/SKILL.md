@@ -72,7 +72,9 @@ is `bp-<key>`.
    ```
    `env_name` is the host default written as `ENV_NAME` into every stack's `.env`.
    Add `fanout` only when one repo stack deploys into several dirs on this host —
-   each destination then carries its own `env_name`.
+   each destination then carries its own `env_name`. Also add
+   `vps/<key>/stacks/backup/targets.yml` (skips with reasons are fine until the host
+   runs the backup job — list `backup` in `exclude` meanwhile); CI fails without it.
 
 9. **Update `CLAUDE.md`** — the VPS Access table, What's Running, and the firewall
    section. Agents read that file, not this one, to know what exists.
@@ -116,10 +118,16 @@ Verify: push a stack under `vps/<key>/stacks/`, watch the run, then
    `root:root` makes the rsync fail; that is why bpvps1's `stalwart`/`traefik`/
    `wordpress` are still in `exclude`.
 
-6. **Update `CLAUDE.md`** — What's Running, plus any note the next agent needs.
+6. **Declare every named volume in `vps/<host>/stacks/backup/targets.yml`** — as a
+   target, or under `skip:` with a reason. CI fails the deploy otherwise.
+   `python vps/shared/check-backup-targets.py` prints the exact Docker volume name it
+   expects. Format: `docs/backup-restore.md`.
+
+7. **Update `CLAUDE.md`** — What's Running, plus any note the next agent needs.
 
 Verify:
 ```bash
+python vps/shared/check-backup-targets.py    # every volume backed up or skipped
 python vps/shared/test_render_ci.py          # renderer self-check
 vps/shared/snapshot-host.sh bp-<host>        # before
 # push, watch the run

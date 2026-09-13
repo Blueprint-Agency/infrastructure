@@ -1,0 +1,16 @@
+# What vps2-prod backs up -- nothing yet. The backup stack lands on this host in #28; until
+# then this file only accounts for every named volume, so none can be missed when it does.
+# `backup` is in this host's `exclude` in vps/hosts.json until a compose file sits beside it.
+#
+# Format and kinds: vps/bpvps2/stacks/backup/targets.yml. Checked in CI by
+# vps/shared/check-backup-targets.py.
+
+targets: []
+
+skip:
+  - volume: teeko-website-db
+    reason: NOT BACKED UP yet -- teeko-website's database, a postgres target in #28.
+  - volume: tools_drizzle-gateway-data
+    reason: NOT BACKED UP yet -- drizzle-gateway state, a volume target in #28.
+  - volume: infra_traefik-letsencrypt
+    reason: NOT BACKED UP yet -- issued certificates, re-issued if lost. Captured in #28.

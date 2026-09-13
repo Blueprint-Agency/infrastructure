@@ -106,9 +106,15 @@ host whose on-host dirs differ from the repo: a single `booking` stack fans out 
 > **Backups: only `booking-staging` on bpvps2 is backed up** (#26, since 2026-09-13). The
 > `backup` stack there dumps it nightly at 03:30 KL into the private R2 bucket
 > `blueprint-backups` (Blueprint account), restic-encrypted with `RESTIC_PASSWORD`. Nothing else
-> on any host has a backup yet — #27–#30. Before any production migration or import, run
+> on any host has a backup yet — #28–#30. Before any production migration or import, run
 > `docker exec backup /app/bin/backup.sh`. Runbook: `docs/backup-restore.md`. `scripts/backup.sh`
 > is a same-host volume tar, **not** a backup of a running Postgres.
+
+> **What a host backs up is `vps/<host>/stacks/backup/targets.yml`** (#27) — every host has
+> one, and CI fails if a named volume in that host's compose files is neither in it nor
+> skipped with a reason. **A new stack with a volume means an edit to that file**, or the
+> deploy fails. Hosts without the backup compose yet carry only skips and list `backup` in
+> `exclude`.
 
 Five things the compose files will not tell you — all of them "do not prune":
 
