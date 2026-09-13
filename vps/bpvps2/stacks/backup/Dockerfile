@@ -11,5 +11,10 @@ COPY --from=docker /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=yq /usr/bin/yq /usr/local/bin/yq
 COPY bin/ /app/bin/
 COPY crontab /etc/crontabs/root
+# Baked in, NOT bind-mounted. CI's rsync replaces targets.yml by rename, and a single-file
+# bind mount stays pinned to the old inode -- while `compose up` sees no config change and
+# keeps the container. A deploy that only added a target would reach nothing. As a COPY
+# layer, a changed file is a changed image, and compose recreates the container.
+COPY targets.yml /app/targets.yml
 RUN chmod 755 /app/bin/*.sh
 ENTRYPOINT ["/app/bin/entrypoint.sh"]

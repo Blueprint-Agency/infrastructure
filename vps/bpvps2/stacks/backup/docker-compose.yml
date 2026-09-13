@@ -44,7 +44,6 @@ services:
       RESTIC_CACHE_VOLUME: backup_restic_cache
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./targets.yml:/app/targets.yml:ro
       - backup_cache:/cache
       - textfile:/textfile
     healthcheck:

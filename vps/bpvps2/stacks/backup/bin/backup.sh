@@ -135,6 +135,9 @@ heartbeat() { # <name> <bytes>
   prom="$TEXTFILE_DIR/backup.prom"
   old=$(cat "$prom" 2>/dev/null || true)
   metrics_update "$old" "$names" "$1" "$(date +%s)" "$2" > "$prom.tmp" || return 1
+  # Explicit: cron runs inherit the entrypoint's umask 077, a `docker exec` run does not,
+  # and a monitoring agent that is not root must be able to read the file after either.
+  chmod 644 "$prom.tmp"
   mv "$prom.tmp" "$prom"
 }
 
