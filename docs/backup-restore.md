@@ -180,17 +180,30 @@ That is member data in plaintext on disk. Delete it when done.
 
 ## The July 2026 dumps (`manual`)
 
-The two dumps taken by hand during the 2026-07-21 move off VPS3 live in a **separate** restic
-repository at the bucket prefix `manual/`, encrypted with **bpvps2's** `RESTIC_PASSWORD`, tagged
-`manual`. They are outside every retention policy — nothing prunes them.
+The two dumps taken by hand on 2026-07-21, around the move off VPS3, live in a **separate**
+restic repository at the bucket prefix `manual/`, encrypted with **bpvps2's** `RESTIC_PASSWORD`:
+snapshot `52d4593f`, tagged `manual,july-2026`, uploaded 2026-09-13. Nothing prunes them.
+
+| File (path in the snapshot) | sha256 |
+|---|---|
+| `/booking-vps3-20260721.dump` | `6a4c70d15fd97754ddf33747fd476e1200f241fe2bfecdc8925d41884b943e0b` |
+| `/booking-staging-pre-seed-20260721.dump` | `3d4abdef6e585d56c0f7d381b12262fefec85ef621c9bb3621d352f0490ff3d1` |
+
+Both hashes were re-read out of R2 after upload and matched the laptop copies.
 
 ```bash
-docker exec -e RESTIC_REPOSITORY="$(docker exec backup sh -c 'echo ${RESTIC_REPOSITORY%/bpvps2}/manual')" \
-  backup restic snapshots
+docker exec backup sh -c 'RESTIC_REPOSITORY=${RESTIC_REPOSITORY%/bpvps2}/manual restic snapshots'
+docker exec backup sh -c 'RESTIC_REPOSITORY=${RESTIC_REPOSITORY%/bpvps2}/manual \
+  restic dump latest /booking-vps3-20260721.dump' > /tmp/booking-vps3-20260721.dump
 ```
+
+> Two more July dumps sit **on bpvps2** in `/root/stacks/booking-staging/`
+> (`booking-migration.dump`, `pre-seed-backup.dump`, one of them world-readable). They are
+> not part of this repository. Decide whether to keep them before deleting.
 
 ## Record of restores
 
 | Date | Instance | Snapshot | Result |
 |---|---|---|---|
 | 2026-09-13 | booking-staging | local test repository on bpvps2, before R2 credentials existed | PASS — tenants 3, clients 6, bookings 4, client_packages 6, stripe_payments 6 |
+| 2026-09-13 | booking-staging | `db582923`, **from R2**, the first real snapshot (327,605 B dump) | PASS — tenants 3, clients 6, bookings 4, client_packages 6, stripe_payments 6 |
