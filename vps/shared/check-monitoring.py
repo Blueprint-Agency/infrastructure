@@ -34,7 +34,11 @@ TOKEN = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*")
 METRIC = re.compile(r"^[A-Za-z_:][A-Za-z0-9_:]*$")
 # The families the agent collects. Only these are checked against the allowlist, so that
 # PromQL functions (absent_over_time) and label names (compose_project) are not read as metrics.
-FAMILY = re.compile(r"^(node|container|machine)_")
+# After the exporters' own families come the textfile producers' prefixes -- a new producer
+# adds its prefix here (docs/textfile-metrics.md). probe_* / sm_* are NOT the agent's: Grafana's
+# synthetic probes write them straight to Grafana Cloud.
+FAMILY = re.compile(r"^(node|container|machine|backup|textfile)_")
+TEXTFILE_VOLUME, TEXTFILE_DIR = "monitoring_textfile", "/textfile"
 CONTAINER = re.compile(r'container="([^"]+)"')
 
 
@@ -94,6 +98,37 @@ def compose_containers(host, problems):
     return containers
 
 
+def check_textfile(key, stack, doc, problems):
+    """The agent's half of the textfile seam (docs/textfile-metrics.md): the shared volume
+    mounted read-only at /textfile, and the textfile collector pointed at it. Missing either,
+    every producer's file is written and never read, and its staleness rule blames the producer."""
+    names = {k: (v or {}).get("name", k) for k, v in (doc.get("volumes") or {}).items()}
+    mounts = []  # (source, target, read-only), short or long compose syntax
+    for svc in (doc.get("services") or {}).values():
+        for m in (svc or {}).get("volumes") or []:
+            if isinstance(m, dict):
+                mounts.append((m.get("source"), m.get("target"), bool(m.get("read_only"))))
+            elif isinstance(m, str) and m.count(":") >= 1:
+                parts = m.split(":")
+                mounts.append((parts[0], parts[1], len(parts) > 2 and "ro" in parts[2].split(",")))
+    found = [ro for src, dst, ro in mounts if dst == TEXTFILE_DIR and names.get(src) == TEXTFILE_VOLUME]
+    if not found:
+        problems.append(f"{key}: {stack.as_posix()}: the agent does not mount the {TEXTFILE_VOLUME} volume "
+                        f"at {TEXTFILE_DIR} -- textfile producers would write and nothing would read")
+    elif not any(found):
+        problems.append(f"{key}: {stack.as_posix()}: mount {TEXTFILE_VOLUME} at {TEXTFILE_DIR} read-only "
+                        "-- the agent reads producers' files, it never writes them")
+    config = stack / "config.alloy"
+    if not config.is_file():
+        problems.append(f"{key}: no {config.as_posix()} -- the agent has no config to read textfiles with")
+        return
+    text = config.read_text(encoding="utf-8")
+    if not re.search(r'set_collectors\s*=\s*\[[^\]]*"textfile"', text) or \
+            not re.search(r'textfile\s*\{[^}]*directory\s*=\s*"' + re.escape(TEXTFILE_DIR) + '"', text):
+        problems.append(f"{key}: {config.as_posix()}: enable the textfile collector with directory = "
+                        f"\"{TEXTFILE_DIR}\" in prometheus.exporter.unix")
+
+
 def check_host(host, by_file, by_rule, problems):
     key = host["key"]
     stack = pathlib.Path(host["dir"]) / "stacks" / "monitoring"
@@ -110,6 +145,7 @@ def check_host(host, by_file, by_rule, problems):
     if labels != {key}:
         problems.append(f"{key}: {stack.as_posix()}: the agent must set MONITORING_HOST: {key} "
                         f"(found {sorted(labels - {'None'}) or 'none'}) -- rules match host=\"{key}\"")
+    check_textfile(key, stack, doc, problems)
     path = stack / "metrics.allowlist"
     if not path.is_file():
         problems.append(f"{key}: no {path.as_posix()} -- the agent keeps only what it lists")

@@ -59,6 +59,47 @@ assert body["overwrite"] is True and body["folderUid"] == "monitoring"
 assert body["dashboard"]["id"] is None and body["dashboard"]["uid"] == "bp-hosts"
 assert dash["id"] == 7
 
+# Synthetic checks: a derived endpoint (vps/shared/public-endpoints.py) -> an SM check body.
+probes = [{"id": 7, "name": "Singapore"}, {"id": 9, "name": "Tokyo"}, {"id": 3, "name": "Paris"}]
+assert ga.probe_ids(["Tokyo", "Singapore"], probes) == [9, 7]
+try:
+    ga.probe_ids(["Singapore", "Atlantis"], probes)
+except ValueError as e:
+    assert "Atlantis" in str(e) and "Paris" in str(e)  # names the unknown one, lists the real ones
+else:
+    raise AssertionError("an unknown probe name should be refused, not dropped")
+
+endpoint = {"hostname": "api.example.com", "host": "h1", "url": "https://api.example.com/health"}
+body = ga.sm_check(endpoint, [7, 9])
+assert body["job"] == "api.example.com" and body["target"] == "https://api.example.com/health"
+# The API takes milliseconds.
+assert body["frequency"] == 60000 and body["timeout"] == 10000
+assert body["enabled"] is True and body["probes"] == [7, 9]
+# `host` is what the endpoint rules name in the alert; managed_by is what lets an apply delete
+# a check whose router is gone without touching a check someone made by hand.
+assert {"name": "host", "value": "h1"} in body["labels"]
+assert {"name": "managed_by", "value": "infrastructure"} in body["labels"]
+http = body["settings"]["http"]
+# A plain-HTTP answer is a failure: every name here is served over TLS, and the TLS metrics
+# are the certificate check. Redirects are followed, so / -> /en is judged on the final page.
+assert http["failIfNotSSL"] is True and http["noFollowRedirects"] is False and http["method"] == "GET"
+assert "id" not in body and "tenantId" not in body
+
+existing = [
+    {"id": 1, "tenantId": 42, "job": "api.example.com", "target": "https://api.example.com/",
+     "labels": [{"name": "host", "value": "h1"}, {"name": "managed_by", "value": "infrastructure"}]},
+    {"id": 2, "tenantId": 42, "job": "gone.example.com", "target": "https://gone.example.com/",
+     "labels": [{"name": "managed_by", "value": "infrastructure"}]},
+    {"id": 3, "tenantId": 42, "job": "handmade", "target": "https://example.net/", "labels": []},
+]
+new = {"hostname": "new.example.com", "host": "h1", "url": "https://new.example.com/"}
+add, update, delete = ga.sm_plan([endpoint, new], [7], existing)
+assert [b["job"] for b in add] == ["new.example.com"]
+# Matched by job: an update carries the existing id and tenantId, and the new target.
+assert [(b["id"], b["tenantId"], b["target"]) for b in update] == [(1, 42, "https://api.example.com/health")]
+# Only a managed check with no endpoint is deleted; the hand-made one is left alone.
+assert [c["id"] for c in delete] == [2]
+
 # The repository's own files translate.
 for path in sorted((HERE.parent / "grafana" / "rules").glob("*.yml")):
     for g in ga.load_yaml(path)["groups"]:

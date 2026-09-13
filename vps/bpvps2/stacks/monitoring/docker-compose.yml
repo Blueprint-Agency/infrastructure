@@ -60,8 +60,10 @@ services:
       - /dev/disk:/dev/disk:ro
       # Log read positions and the metrics WAL: a restart resumes rather than re-ships.
       - alloy_data:/var/lib/alloy/data
-      # Not yet: the read-only monitoring_textfile mount and its textfile collector are #24's
-      # (docs/textfile-metrics.md). Until then backup.prom is written and nothing reads it.
+      # The textfile seam (#24): producers (backup.prom, ...) write *.prom here and the
+      # textfile collector turns them into metrics. Read-only -- the agent never writes a
+      # producer's file. Contract: docs/textfile-metrics.md.
+      - textfile:/textfile:ro
     # Guard rails on a 1 vCPU / 4 GB host that serves the booking API. Measured use is in
     # docs/monitoring.md; these are ceilings, not the expected figure.
     cpus: 0.5
@@ -70,3 +72,8 @@ services:
 volumes:
   alloy_data:
     name: monitoring_alloy_data
+  # Shared with every producer stack, so it belongs to none: created by ci/post-sync.sh here
+  # and in each producer's (idempotent), whichever stack deploys first.
+  textfile:
+    external: true
+    name: monitoring_textfile

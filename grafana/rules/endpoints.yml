@@ -1,0 +1,121 @@
+# External endpoint and TLS alerts (#24), on the metrics Grafana Cloud Synthetic Monitoring
+# writes for the checks scripts/grafana-apply.py creates -- one per public name, derived by
+# vps/shared/public-endpoints.py. Applied by scripts/grafana-apply.py; this file is the copy of
+# record, not the web UI.
+#
+# probe_* carry job (= the hostname), instance (= the URL) and probe. The check's `host` label
+# lives on sm_check_info only -- as label_host, or as host if the tenant writes labels
+# unprefixed -- so each query joins it on. label_replace copies label_host into host when it is
+# present and leaves host alone when it is not, which works in either mode. topk 1 per
+# (instance, job) keeps the join one-to-one even while a changed host label's old series is
+# still fresh -- without it the join errors for ~5 min and the rule reads Error, not firing.
+# Silences and summaries then use host=bpvps1 / host=bpvps2, the same label as every other rule.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: endpoints
+    folder: Monitoring
+    interval: 1m
+    rules:
+      # The ten-week VPS1 outage: every container healthy, every domain 404. Nothing on the
+      # host can see this; a probe outside it can.
+      #
+      # max_over_time over 2m, per probe, then max across probes: this is 1 if ANY probe
+      # succeeded even once in two minutes. So it drops below 1 only after every probe has
+      # failed at least two consecutive runs (checks run every 60 s) -- a real outage, not
+      # one probe's bad minute -- a deliberate reading of #22's "2 consecutive failures": every
+      # probe, not any. No `for`: the window already is the wait.
+      #
+      # Traefik stopped at t0, worst case: the last success leaves the window by t0+2m, the next
+      # evaluation by t0+3m, SM's push lag ~1m -> t0+4m, then the notification policy's group
+      # wait. #24 wants a phone within five minutes, so the critical route's group wait is 10 s
+      # (docs/monitoring.md, first-time setup). At the default 30 s it is too close to call.
+      - uid: endpoint-down
+        title: Public endpoint failing
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                max by (instance, job) (max_over_time(probe_success[2m]))
+                * on (instance, job) group_left (host)
+                max by (instance, job, host) (topk by (instance, job) (1, label_replace(sm_check_info, "host", "$1", "label_host", "(.+)")))
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+        # No probe data at all means Synthetic Monitoring itself stopped reporting -- say so,
+        # rather than read silence as health.
+        noDataState: NoData
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} on {{ $labels.host }} is failing from every probe"
+          description: >-
+            Every Grafana probe has failed at least two runs in a row against {{ $labels.instance }}.
+            If every name on {{ $labels.host }} fires together, suspect Traefik or the host:
+            `ssh bp-{{ $labels.host }} 'docker ps; docker logs --tail 50 traefik'`. One name alone:
+            its container, its router rule, or its DNS record. Runbook: docs/monitoring.md.
+
+      # Renewal fails silently: a TLS-ALPN-01 record flipped to proxied, a token scoped to the
+      # wrong zone, acme.sh keyed on a renamed primary. Every renewal here runs at 30 days left,
+      # so 21 days means at least nine days of failed attempts.
+      - uid: tls-expiry
+        title: TLS certificate expiring
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                (min by (instance, job) (probe_ssl_earliest_cert_expiry) - time()) / 86400
+                * on (instance, job) group_left (host)
+                max by (instance, job, host) (topk by (instance, job) (1, label_replace(sm_check_info, "host", "$1", "label_host", "(.+)")))
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [21]
+        # The endpoint rule already covers "no probe data".
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }} on {{ $labels.host }}: TLS certificate expires in {{ humanize $values.A.Value }} days"
+          description: >-
+            The certificate served for {{ $labels.job }} has under 21 days left, so renewal has been
+            failing for over a week. Which renewer owns the name: docs/monitoring.md, "External checks".

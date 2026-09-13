@@ -23,7 +23,14 @@ prometheus.exporter.unix "host" {
   procfs_path    = "/host/proc"
   sysfs_path     = "/host/sys"
   rootfs_path    = "/rootfs"
-  set_collectors = ["cpu", "meminfo", "filesystem", "netdev"]
+  set_collectors = ["cpu", "meminfo", "filesystem", "netdev", "textfile"]
+
+  // The textfile seam (#24): every *.prom a producer writes into the monitoring_textfile
+  // volume becomes a metric, through the same allowlist as everything else. The one door for
+  // cross-cutting signals -- a new one is a file, never a new exporter. docs/textfile-metrics.md.
+  textfile {
+    directory = "/textfile"
+  }
 
   filesystem {
     // Real disks only: overlay, tmpfs and the kernel pseudo-filesystems are per-container

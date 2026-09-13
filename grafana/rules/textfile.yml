@@ -1,0 +1,145 @@
+# Alerts on the textfile seam (#24) -- signals producers write into the monitoring_textfile
+# volume and the agent's textfile collector reads. Contract: docs/textfile-metrics.md.
+# Applied by scripts/grafana-apply.py; this file is the copy of record, not the web UI.
+#
+# A producer reports when it last SUCCEEDED, never that it failed -- a stopped or crashed
+# producer cannot report anything. So every producer's rule is a staleness rule: the age of its
+# timestamp, OR its series being absent (a deleted file must read as failure, not silence).
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: textfile
+    folder: Monitoring
+    interval: 1m
+    rules:
+      # The seam itself. The collector skips a file it cannot parse and sets this to 1 -- which
+      # would otherwise look exactly like that producer going stale, and blame the wrong thing.
+      - uid: textfile-unreadable-bpvps2
+        title: Textfile metrics unreadable on bpvps2
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: max by (host) (node_textfile_scrape_error{host="bpvps2"})
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        # No series means no agent. container-down-bpvps2 exempts the agent itself, but reports
+        # it the only way it can: every other container on the host goes absent at once.
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+          host: bpvps2
+        annotations:
+          summary: "A *.prom file on {{ $labels.host }} cannot be parsed"
+          description: >-
+            The agent skips a malformed file, so that producer's metrics stop and its staleness
+            alert follows. `ssh bp-bpvps2 'docker logs --tail 50 alloy'` names the file. The usual
+            cause is a producer writing in place instead of tmp + mv. docs/textfile-metrics.md.
+
+      # Producer: the backup job (#27), after each target's snapshot. Nightly at 03:30 KL, so
+      # 26 h is one missed night plus slack for a slow run.
+      - uid: backup-stale-bpvps2
+        title: Backup heartbeat stale on bpvps2
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                (time() - backup_last_success_timestamp_seconds{host="bpvps2"} > 26 * 3600)
+                or absent_over_time(backup_last_success_timestamp_seconds{host="bpvps2"}[15m])
+          - refId: C
+            relativeTimeRange:
+              from: 900
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        # Every target fresh -> the query returns nothing. That is the healthy state.
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: critical
+          host: bpvps2
+        annotations:
+          summary: "bpvps2 backup {{ $labels.target }} has not succeeded in 26 hours (no target label: no heartbeat at all)"
+          description: >-
+            Either a target's snapshot failed last night, or backup.prom is gone. Check
+            `ssh bp-bpvps2 'docker ps --filter name=backup; docker logs --tail 100 backup'`. If
+            the agent itself is down, container-down-bpvps2 fires alongside. Runbook:
+            docs/backup-restore.md.
+
+      # Producer: canary.prom -- the seam's own test fixture, not a service. Inert while the file
+      # does not exist. The test in docs/monitoring.md writes it, lets it age past five minutes,
+      # refreshes it, then deletes it. Kept permanently so that test can be rerun as it is.
+      - uid: textfile-canary-stale-bpvps2
+        title: Textfile canary stale on bpvps2
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: time() - textfile_canary_timestamp_seconds{host="bpvps2"}
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [300]
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: info
+          host: bpvps2
+        annotations:
+          summary: "textfile canary on {{ $labels.host }} is {{ humanizeDuration $values.A.Value }} old"
+          description: >-
+            Expected only during the textfile seam test in docs/monitoring.md. Outside it, someone
+            left /textfile/canary.prom behind: delete it and this resolves.

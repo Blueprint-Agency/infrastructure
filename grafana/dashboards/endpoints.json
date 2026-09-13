@@ -1,0 +1,62 @@
+{
+  "uid": "bp-endpoints",
+  "title": "Endpoints",
+  "description": "Every public name bpvps1 and bpvps2 serve, as Grafana's probes see it from outside: up or down, and TLS days left per hostname. The names are derived by vps/shared/public-endpoints.py; copy of record is grafana/dashboards/endpoints.json in Blueprint-Agency/infrastructure, applied by scripts/grafana-apply.py. Edits made in the UI are overwritten on the next apply.",
+  "tags": ["infrastructure"],
+  "timezone": "Asia/Kuala_Lumpur",
+  "schemaVersion": 39,
+  "refresh": "1m",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "type": "table",
+      "title": "TLS days left, per hostname",
+      "description": "The certificate each name actually serves to a browser -- for the proxied Kaiteki names that is Cloudflare's edge certificate. Alert: tls-expiry, below 21 days.",
+      "gridPos": {"x": 0, "y": 0, "w": 10, "h": 12},
+      "datasource": {"type": "prometheus", "uid": "grafanacloud-prom"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d",
+          "decimals": 1,
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "red", "value": null},
+            {"color": "orange", "value": 21},
+            {"color": "green", "value": 30}
+          ]},
+          "custom": {"cellOptions": {"type": "color-background"}}
+        }
+      },
+      "options": {"sortBy": [{"displayName": "Value", "desc": false}]},
+      "transformations": [{"id": "labelsToFields"}, {"id": "organize", "options": {"excludeByName": {"Time": true}}}],
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "format": "table",
+          "expr": "(min by (job) (probe_ssl_earliest_cert_expiry) - time()) / 86400"
+        }
+      ]
+    },
+    {
+      "type": "state-timeline",
+      "title": "Up, from every probe",
+      "description": "1 when any probe succeeded in the last two minutes. Alert: endpoint-down, when every probe fails two runs in a row.",
+      "gridPos": {"x": 10, "y": 0, "w": 14, "h": 12},
+      "datasource": {"type": "prometheus", "uid": "grafanacloud-prom"},
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "up", "color": "green"}}}]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{job}}",
+          "expr": "max by (job) (max_over_time(probe_success[2m]))"
+        }
+      ]
+    }
+  ]
+}

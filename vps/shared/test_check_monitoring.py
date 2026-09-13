@@ -67,6 +67,20 @@ MONITORING = """
         container_name: alloy
         environment:
           MONITORING_HOST: h1
+        volumes:
+          - textfile:/textfile:ro
+    volumes:
+      textfile:
+        external: true
+        name: monitoring_textfile
+"""
+CONFIG = """
+    prometheus.exporter.unix "host" {
+      set_collectors = ["cpu", "textfile"]
+      textfile {
+        directory = "/textfile"
+      }
+    }
 """
 ALLOWLIST = "node_cpu_seconds_total\ncontainer_last_seen\n"
 
@@ -104,6 +118,7 @@ def base(**over):
         "vps/h1/stacks/proxy/docker-compose.yml": PROXY,
         "vps/h1/stacks/monitoring/docker-compose.yml": MONITORING,
         "vps/h1/stacks/monitoring/metrics.allowlist": ALLOWLIST,
+        "vps/h1/stacks/monitoring/config.alloy": CONFIG,
         "grafana/dashboards/hosts.json": dashboard('sum by (host) (rate(node_cpu_seconds_total{mode!="idle"}[5m]))'),
         "grafana/rules/containers.yml": down("h1", ["app-web-staging", "app-web-prod", "proxy"]),
     }
@@ -164,6 +179,45 @@ expect("host label missing",
        base(**{"vps/h1/stacks/monitoring/docker-compose.yml": MONITORING.replace("MONITORING_HOST: h1",
                                                                                  "TZ: UTC")}),
        1, "MONITORING_HOST")
+
+# The textfile seam (#24, docs/textfile-metrics.md): producers write *.prom into the shared
+# monitoring_textfile volume; the agent must mount it read-only at /textfile and read it there.
+# Without the mount every producer's signal is written and never read -- and a staleness rule
+# would read that as "the backup stopped", not "monitoring cannot see".
+expect("textfile volume not mounted",
+       base(**{"vps/h1/stacks/monitoring/docker-compose.yml":
+               MONITORING.replace("          - textfile:/textfile:ro\n", "")}),
+       1, "monitoring_textfile", "/textfile")
+expect("textfile volume mounted writable",
+       base(**{"vps/h1/stacks/monitoring/docker-compose.yml":
+               MONITORING.replace("textfile:/textfile:ro", "textfile:/textfile")}),
+       1, "read-only")
+expect("textfile mount is some other volume",
+       base(**{"vps/h1/stacks/monitoring/docker-compose.yml":
+               MONITORING.replace("name: monitoring_textfile", "name: scratch")}),
+       1, "monitoring_textfile")
+# Compose's long volume syntax is the same mount; it must not read as missing.
+expect("textfile volume in long syntax",
+       base(**{"vps/h1/stacks/monitoring/docker-compose.yml": MONITORING.replace(
+           "          - textfile:/textfile:ro\n",
+           "          - type: volume\n            source: textfile\n            target: /textfile\n"
+           "            read_only: true\n")}), 0)
+expect("no config.alloy",
+       base(**{"vps/h1/stacks/monitoring/config.alloy": None}), 1, "no vps/h1/stacks/monitoring/config.alloy")
+expect("textfile collector not enabled",
+       base(**{"vps/h1/stacks/monitoring/config.alloy": CONFIG.replace(', "textfile"', "")}),
+       1, "config.alloy", "textfile")
+expect("textfile collector reads another directory",
+       base(**{"vps/h1/stacks/monitoring/config.alloy": CONFIG.replace('"/textfile"', '"/tmp"')}),
+       1, "config.alloy", "/textfile")
+
+# A textfile producer's metrics are agent-collected like node_*: a rule reading one that is
+# not allowlisted is a rule that can never fire.
+expect("textfile metric read but not allowlisted",
+       base(**{"grafana/dashboards/hosts.json":
+               dashboard("node_cpu_seconds_total", "container_last_seen",
+                         "time() - backup_last_success_timestamp_seconds")}),
+       1, "backup_last_success_timestamp_seconds", "not in")
 
 expect("this repository", REPO, 0)
 

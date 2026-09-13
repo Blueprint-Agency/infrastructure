@@ -1,0 +1,39 @@
+# External endpoint checks (#24) -- Grafana Cloud Synthetic Monitoring, probed from Grafana's
+# own probes, outside our network.
+#
+# This file is NOT the list of names. The list is derived by vps/shared/public-endpoints.py from
+# every Traefik router on bpvps1 and bpvps2 (compose labels and dynamic/*.yml), cross-checked
+# against apps/registry.yml. A new router is a new check with no edit here. What lives here is
+# only what the repository cannot know:
+#
+#   vars       values of ${VARS} in router rules that come from host .env files, never committed.
+#              Key "*" applies everywhere; "<host>/<stack dir>" to one destination (fanout-aware).
+#              Read off the hosts with `docker inspect` on 2026-09-14.
+#   endpoints  per-name exceptions: `path` to probe instead of /, or `skip: <reason>`.
+#              A registry domain can never be skipped; CI fails it.
+#
+# Apply: scripts/grafana-apply.py. Runbook: docs/monitoring.md, "External checks".
+
+# Grafana's public probes each check runs from, by name (grafana-apply.py fails on an unknown
+# one and lists the real names). Three, near the users: grafana/rules/endpoints.yml fires only
+# when EVERY probe fails, so one probe's own network trouble is not a page.
+probes: [Singapore, Tokyo, Mumbai]
+
+vars:
+  "*":
+    BASE_DOMAIN: teeko.ai              # org variable, written into every stack's .env by CI
+  bpvps1/wordpress:
+    WP_HOST: blog.kaiteki.my
+  bpvps2/booking-staging:
+    BOOKING_FQDN: api.dev.reservetoday.app
+  bpvps2/booking-prod:
+    BOOKING_FQDN: api.reservetoday.app
+
+endpoints:
+  # The dashboard routers exist, but neither name has a DNS record (checked 2026-09-14), so
+  # nothing outside can reach them. Probing would be a permanently failing check. If a record
+  # is ever added, remove the skip -- and expect a 401 from the basic-auth middleware.
+  traefik-bpvps1.teeko.ai:
+    skip: router exists but the name has no DNS record -- not public
+  traefik-bpvps2.teeko.ai:
+    skip: router exists but the name has no DNS record -- not public

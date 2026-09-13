@@ -26,8 +26,32 @@ on:
     paths:
       - 'vps/**'
       - '.github/workflows/deploy-infra.yml'
+      # Not deployed, but checked: a registry domain or a rule change must still fail the
+      # monitoring drift job. Such a push selects no host, so only that job runs.
+      - 'apps/registry.yml'
+      - 'grafana/**'
+      - 'scripts/grafana-apply.py'
+      - 'scripts/test_grafana_apply.py'
 
 jobs:
+  # ── Monitoring agrees with itself — runs on every push, host selected or not ─
+  # Every allowlisted metric backs a panel or rule under grafana/, every metric a panel or rule
+  # reads is allowlisted, and each monitored host's container-down rule names exactly the
+  # containers its compose files define. Every public name a router serves on an in-scope host
+  # gets an external check, and every registry domain is one of them (#24). Then the
+  # grafana-apply translation, and every Alloy config validated against its pinned tag.
+  monitoring-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check monitoring allowlist, endpoints, dashboards, rules and agent config
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
+          python3 vps/shared/test_check_monitoring.py
+          python3 vps/shared/test_public_endpoints.py
+          python3 scripts/test_grafana_apply.py
+          bash vps/shared/validate-alloy.sh
+
   # ── Map changed paths → host entries from vps/hosts.json ─────────────────────
   detect:
     runs-on: ubuntu-latest
@@ -53,7 +77,8 @@ jobs:
 
   # ── One job, fanned out over the hosts detect selected ───────────────────────
   deploy:
-    needs: detect
+    # A drift failure blocks every host's deploy, as it did when it was a step here.
+    needs: [detect, monitoring-drift]
     if: needs.detect.outputs.hosts != '[]'
     runs-on: ubuntu-latest
     environment: ${{ matrix.host.key }}
@@ -94,16 +119,6 @@ jobs:
         run: |
           python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
           python3 vps/shared/test_check_backup_targets.py
-
-      # Monitoring agrees with itself: every allowlisted metric backs a panel or rule under
-      # grafana/, every metric a panel or rule reads is allowlisted, and each monitored host's
-      # container-down rule names exactly the containers its compose files define. Then the
-      # grafana-apply translation, and every Alloy config validated against its pinned tag.
-      - name: Check monitoring allowlist, dashboards, rules and agent config
-        run: |
-          python3 vps/shared/test_check_monitoring.py
-          python3 scripts/test_grafana_apply.py
-          bash vps/shared/validate-alloy.sh
 
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
