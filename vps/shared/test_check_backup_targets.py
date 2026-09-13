@@ -278,6 +278,80 @@ expect("an exemption with a blank reason fails", repo(
         "vps/h1/stacks/app/docker-compose.yml": DB_COMPOSE,
     }), 1, "needs a reason")
 
+# ── The job itself: one implementation, run on every in-scope host ─────────────────────
+# Each host's backup stack carries its own copy of the job, because CI rsyncs only the stack
+# directory. The copies must not drift: a fix landed on one host and not the other is a host
+# still running the bug. Only crontab, the compose file, targets.yml and ci/ are per host.
+H2 = [{"key": "h1", "dir": "vps/h1", "env_name": "prod"},
+      {"key": "h2", "dir": "vps/h2", "env_name": "prod"}]
+
+
+def job(host, cron="30 3 * * *", lib="# lib\n", extra=None):
+    files = {
+        f"vps/{host}/stacks/app/docker-compose.yml":
+            DB_COMPOSE.replace("web-assets", f"{host}-assets").replace("app-db", f"{host}-db"),
+        f"vps/{host}/stacks/backup/docker-compose.yml": "services:\n  backup: {image: x}\n",
+        f"vps/{host}/stacks/backup/Dockerfile": "FROM restic/restic:0.18.1\n",
+        f"vps/{host}/stacks/backup/bin/lib.sh": lib,
+        f"vps/{host}/stacks/backup/bin/backup.sh": "# backup\n",
+        f"vps/{host}/stacks/backup/crontab": f"# a comment, 30 3 * * *\n{cron} /app/bin/backup.sh\n",
+        f"vps/{host}/stacks/backup/targets.yml": f"""
+            targets:
+              - {{name: db, kind: postgres, container: {host}-db, database: d, role: postgres, floor: 1K}}
+              - {{name: assets, kind: volume, volume: {host}-assets, floor: 1K}}
+        """,
+    }
+    files.update(extra or {})
+    return files
+
+
+expect("two hosts with the same job and staggered schedules pass", repo(H2, {
+    **job("h1"), **job("h2", cron="30 4 * * *")}), 0)
+
+expect("a job file that differs between hosts fails, naming the file", repo(H2, {
+    **job("h1"), **job("h2", cron="30 4 * * *", lib="# lib, patched on h2 only\n")}), 1,
+    "bin/lib.sh", "h1", "h2")
+
+expect("a job file present on one host only fails", repo(H2, {
+    **job("h1", extra={"vps/h1/stacks/backup/bin/restore-drill.sh": "# drill\n"}),
+    **job("h2", cron="30 4 * * *")}), 1, "bin/restore-drill.sh")
+
+# The hosts share one bucket and upload at night: starting together contends for bandwidth.
+expect("two hosts starting at the same time fail", repo(H2, {
+    **job("h1"), **job("h2")}), 1, "stagger", "30 3")
+
+expect("the same start written differently still fails", repo(H2, {
+    **job("h1", cron="30 4 * * *"), **job("h2", cron="30 04 * * *")}), 1, "stagger")
+
+expect("a host that runs the job without a crontab fails", repo(H2, {
+    **job("h1"), **{k: v for k, v in job("h2").items() if not k.endswith("crontab")}}), 1,
+    "h2", "crontab")
+
+# drill_tables: which tables the restore drill counts. Optional, database kinds only, and
+# spliced into SQL -- so plain identifiers only.
+for label, drill, rc, needle in [
+    ("a list of identifiers is accepted", ["tenants", "wp_posts"], 0, None),
+    ("an empty list fails", [], 1, "drill_tables"),
+    ("a string instead of a list fails", "tenants clients", 1, "drill_tables"),
+    ("an identifier with SQL in it fails", ["tenants; drop table x"], 1, "drill_tables"),
+]:
+    t = {"name": "db", "kind": "postgres", "container": "app-db", "database": "d",
+         "role": "postgres", "floor": "1K", "drill_tables": drill}
+    expect(f"drill_tables: {label}", repo(H1, {
+        "vps/h1/stacks/app/docker-compose.yml": DB_COMPOSE,
+        "vps/h1/stacks/backup/targets.yml": json.dumps({
+            "targets": [t], "skip": [{"volume": "web-assets", "reason": "r"}]}),
+    }), rc, *([needle] if needle else []))
+
+expect("drill_tables on a volume target fails", repo(H1, {
+    "vps/h1/stacks/app/docker-compose.yml": DB_COMPOSE,
+    "vps/h1/stacks/backup/targets.yml": json.dumps({"targets": [
+        {"name": "db", "kind": "postgres", "container": "app-db", "database": "d",
+         "role": "postgres", "floor": "1K"},
+        {"name": "a", "kind": "volume", "volume": "web-assets", "floor": "1K",
+         "drill_tables": ["x"]}]}),
+}), 1, "drill_tables")
+
 # And the real thing.
 r = check(REPO)
 assert r.returncode == 0, f"this repository's backup targets do not check out:\n{r.stdout}{r.stderr}"

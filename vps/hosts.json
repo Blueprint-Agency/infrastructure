@@ -11,8 +11,8 @@
     "exclude": "",  "app_stacks": "ehailing" },
 
   { "key": "bpvps1", "dir": "vps/bpvps1", "env_name": "prod",
-    "_comment": "stalwart/traefik/wordpress are root:root on the host; CI connects as deploy and cannot write them. Excluded until they are chowned to deploy. backup holds only targets.yml (all skips) until #28 adds its compose.",
-    "exclude": "stalwart traefik wordpress backup", "app_stacks": "" },
+    "_comment": "stalwart/traefik/wordpress are root:root on the host; CI connects as deploy and cannot write them. Excluded until they are chowned to deploy. backup is NOT excluded: it is its own deploy-owned dir that reaches their data through the Docker socket (#28), and its post-sync.sh refuses a dir that is not.",
+    "exclude": "stalwart traefik wordpress", "app_stacks": "" },
 
   { "key": "bpvps2", "dir": "vps/bpvps2", "env_name": "prod",
     "_comment": "No mail here since 2026-09-12 (#12) -- the stalwart stack and its exclude went with it. booking is one repo stack deployed twice, each destination carrying its own env_name.",

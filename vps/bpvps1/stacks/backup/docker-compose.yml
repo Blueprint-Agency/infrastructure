@@ -1,0 +1,70 @@
+# backup — nightly encrypted, deduplicated snapshots of bpvps1's data to R2.
+#
+# WHAT is backed up is not in this file: it is targets.yml, next to it, read at every run.
+# Adding a database or a volume is a line there plus a deploy.
+#
+# The job is the SAME job as bpvps2's: Dockerfile and bin/ are copies, and CI fails if they
+# drift (vps/shared/check-backup-targets.py). Change them on both hosts, in one commit.
+# Per host: this file, crontab (the two hosts stagger), targets.yml, ci/.
+#
+# Private bucket `blueprint-backups` in the Blueprint Cloudflare account; this host's
+# restic repository is its `bpvps1/` prefix, with its OWN RESTIC_PASSWORD -- bpvps2's
+# passphrase cannot read it, nor this one bpvps2's. Lose it and every snapshot in this
+# repository is unreadable; it lives in the `bpvps1` GitHub Environment and in the team
+# password manager.
+#
+# stalwart, traefik and wordpress are root-owned stacks CI cannot deploy into. This stack
+# does not live inside them: it is its own deploy-owned directory, and reaches their data
+# only through the Docker socket -- mariadb-dump inside wp-db, and each volume mounted
+# read-only into a throwaway container. ci/post-sync.sh refuses to deploy a stack dir that
+# is not wholly owned by deploy.
+#
+# Runbook (list, restore, drill, heartbeat): docs/backup-restore.md.
+services:
+  backup:
+    build: .
+    image: blueprint-backup:local
+    pull_policy: build
+    # Not keyed on ${ENV_NAME}: one backup job per HOST, covering every instance on it.
+    container_name: backup
+    hostname: bpvps1
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Kuala_Lumpur
+      BACKUP_HOST: bpvps1
+      BACKUP_TARGETS: /app/targets.yml
+      # The throwaway containers that read volume targets run this same image.
+      BACKUP_IMAGE: blueprint-backup:local
+      # Heartbeat: backup.prom. Contract: docs/textfile-metrics.md. No monitoring agent reads
+      # it on this host yet; the healthcheck below does.
+      TEXTFILE_DIR: /textfile
+      # Healthcheck limit: a day, plus an hour for tonight's run to finish before the
+      # previous success counts as missed.
+      BACKUP_MAX_AGE: "90000"
+      # From ci/env.ci, rendered by CI from the bpvps1 Environment; a blank one fails the deploy.
+      RESTIC_REPOSITORY: s3:https://${R2_BACKUP_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BACKUP_BUCKET}/bpvps1
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD}
+      AWS_ACCESS_KEY_ID: ${R2_BACKUP_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${R2_BACKUP_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: auto
+      RESTIC_CACHE_DIR: /cache
+      RESTIC_CACHE_VOLUME: backup_restic_cache
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - backup_cache:/cache
+      - textfile:/textfile
+    healthcheck:
+      test: ["CMD", "/app/bin/healthcheck.sh"]
+      interval: 5m
+      timeout: 30s
+      retries: 1
+      start_period: 1m
+
+volumes:
+  backup_cache:
+    name: backup_restic_cache
+  # The same external volume as bpvps2, so a monitoring stack landing here later reads it
+  # without a change to this file. Created by post-sync.sh.
+  textfile:
+    external: true
+    name: monitoring_textfile

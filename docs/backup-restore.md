@@ -9,11 +9,19 @@ unprotected: ehailing production Postgres, both n8n databases and their encrypti
 WABA database, and both teeko-website databases. `check-backup-targets.py` prints that list on
 every run, so a clean check never reads as "everything is backed up".
 
-**Coverage today: `booking-staging` on bpvps2 only** (#26) — the instance that holds every
-studio's real member and booking data. What each in-scope host backs up is declared in
-`vps/<host>/stacks/backup/targets.yml` (#27). Still to land: bpvps1 (#28), the mail store
-(#29), and restore-to-live plus the monthly drill and hypervisor snapshots (#30). Until those
-land, nothing except `booking-staging` is backed up anywhere.
+**Coverage today** — what each in-scope host backs up is declared in
+`vps/<host>/stacks/backup/targets.yml` (#27):
+
+| Host | Targets |
+|---|---|
+| bpvps2 | `booking-staging` (every studio's real member and booking data, #26), `traefik-certs` (#28) |
+| bpvps1 | `wordpress` (the Kaiteki blog database), `bulwark-settings`, `bulwark-admin`, `bulwark-admin-state`, `traefik-certs` (#28) |
+
+> ⚠️ **The mail store is NOT backed up** — `stalwart_stalwart-data`, all mail for all three
+> domains. It is an embedded store, and reading it live is not a backup; its method is #29.
+> Nor is `booking-prod` (seed data only) or the WordPress `wp-content` directory, which is a
+> bind mount, not a volume, and so outside `targets.yml` altogether. Still to land after the
+> mail store: restore-to-live plus the monthly drill and hypervisor snapshots (#30).
 
 ## Where snapshots are
 
@@ -21,10 +29,10 @@ land, nothing except `booking-staging` is backed up anywhere.
 |---|---|
 | Bucket | `blueprint-backups`, **Blueprint** Cloudflare account, location APAC |
 | Access | private — no `r2.dev` URL, no custom domain. Not `reservetoday-staging`, which serves uploads |
-| Repository | one restic repository per host, at the bucket prefix `<host>/` (here `bpvps2/`) |
-| Encryption | client-side, restic, with that host's `RESTIC_PASSWORD`. R2 only ever holds ciphertext |
-| Credential | an R2 API token with Object Read & Write on **this bucket only** |
-| Schedule | 03:30 Asia/Kuala_Lumpur, `crontab` in the `backup` stack |
+| Repository | one restic repository per host, at the bucket prefix `<host>/` — `bpvps1/`, `bpvps2/` |
+| Encryption | client-side, restic, with **that host's own** `RESTIC_PASSWORD`. R2 only ever holds ciphertext, and neither host's passphrase opens the other's repository |
+| Credential | an R2 API token with Object Read & Write on **this bucket only** — one token, shared by both hosts (R2 cannot scope a token to a prefix) |
+| Schedule | bpvps2 **03:30**, bpvps1 **04:30** Asia/Kuala_Lumpur, each host's `crontab` in its `backup` stack. Staggered so they do not contend for upload bandwidth; CI refuses two hosts on one start time |
 | Retention | 7 daily / 4 weekly / 6 monthly per target, `forget --prune` only after that target's snapshot succeeded |
 
 Every target is its own snapshot, tagged with the target's name and taken with `--host <host>`:
@@ -88,7 +96,22 @@ therefore cannot ship until someone decides about that volume.
 
 > On a host with no backup compose yet, `targets: []` plus skips is allowed, and `backup` sits
 > in that host's `exclude` in `vps/hosts.json` so CI does not try to start a stack that has only
-> a targets file. Remove it from `exclude` when #28 adds the compose.
+> a targets file. Remove it from `exclude` when the compose lands (bpvps1's did in #28).
+
+### One job, two copies
+
+CI rsyncs only a stack's own directory, so each host's `backup` stack carries its **own copy**
+of `Dockerfile` and `bin/`. The same check fails CI when those copies differ, naming the file
+and the hosts — **change the job on both hosts in one commit.** Per host, and free to differ:
+`docker-compose.yml`, `crontab`, `targets.yml`, `ci/`. It also fails when two hosts' crontabs
+start at the same time.
+
+> bpvps1's `stalwart`, `traefik` and `wordpress` stacks are root-owned and excluded from CI.
+> The backup stack does **not** live inside them: `/root/stacks/backup` is its own
+> `deploy`-owned directory (deploy owns `/root/stacks`, so CI's rsync creates it — no root step),
+> and it reaches their data only through the Docker socket. Its `post-sync.sh` fails the deploy
+> if anything in that directory is not owned by `deploy`, so a root-owned leftover cannot
+> quietly pin the host to an old job.
 
 ### The floor
 
@@ -96,9 +119,19 @@ Every target has one. A dump or volume **smaller than its floor fails that targe
 heartbeat** — so an empty or truncated database raises the same alarm as a backup that never
 ran. Set it above what an *empty* instance of the same thing measures:
 
-| Target | Measured 2026-09-13 | Floor |
+| Target | Measured | Floor |
 |---|---|---|
-| booking-staging | live 327,605 B · schema only 255,569 B · booking-prod (seed data) 282,750 B | `280K` (286,720 B) |
+| booking-staging | 2026-09-13: live 327,605 B · schema only 255,569 B · booking-prod (seed data) 282,750 B | `280K` (286,720 B) |
+| wordpress (bpvps1) | 2026-09-14: live 49,037,512 B · posts/postmeta/users/terms alone 18,209,402 B · schema only 66,830 B | `16M` |
+| bulwark-settings | 2026-09-14: 92K, 22 files | `32K` |
+| bulwark-admin | 2026-09-14: 20K, 4 files | `12K` |
+| bulwark-admin-state | 2026-09-14: 12K, 2 files | `8K` |
+| traefik-certs | 2026-09-14: bpvps1 80K, bpvps2 92K | `32K` |
+
+> **Volume sizes are du's allocated KiB**, not bytes: 4K for the directory and at least 4K per
+> file, however small. A volume floor therefore reads "at least this many files". An empty,
+> freshly created volume measures 4K. WordPress's floor deliberately leaves out Rank Math's
+> analytics cache (most of the live dump), which a plugin reset may legitimately empty.
 
 ## Did it work? Heartbeat, healthcheck, exit code
 
@@ -135,22 +168,28 @@ human, the alert pages one.)
 
 | Name | Where in GitHub | Also in |
 |---|---|---|
-| `R2_BACKUP_ACCOUNT_ID` | `bpvps2` Environment secret | — |
-| `R2_BACKUP_BUCKET` | `bpvps2` Environment variable | — |
-| `R2_BACKUP_ACCESS_KEY_ID`, `R2_BACKUP_SECRET_ACCESS_KEY` | `bpvps2` Environment secret | Cloudflare → R2 → API tokens |
-| `RESTIC_PASSWORD` | `bpvps2` Environment secret | **team password manager** |
+Each in-scope host's Environment (`bpvps1`, `bpvps2`) holds the same five names:
 
-Rendered by CI from `vps/bpvps2/stacks/backup/ci/env.ci`; a blank one fails the deploy.
+| Name | Where in GitHub | Also in |
+|---|---|---|
+| `R2_BACKUP_ACCOUNT_ID` | Environment secret | — |
+| `R2_BACKUP_BUCKET` | Environment variable | — |
+| `R2_BACKUP_ACCESS_KEY_ID`, `R2_BACKUP_SECRET_ACCESS_KEY` | Environment secret — the same token in both | Cloudflare → R2 → API tokens; `.env` |
+| `RESTIC_PASSWORD` | Environment secret — **different in each** | **team password manager**; `.env` as `RESTIC_PASSWORD_<HOST>` |
+
+Rendered by CI from `vps/<host>/stacks/backup/ci/env.ci`; a blank one fails the deploy.
 All of them sit in the **Environment**, not at repo level, so no other host's deploy job ever
-receives them. When #28 adds a host, that host's Environment gets its own set.
+receives them.
 
-> ⚠️ **Lose `RESTIC_PASSWORD` and every bpvps2 snapshot is unreadable.** GitHub never returns a
-> secret's value, so the password-manager copy is the only one a human can read back. It is
-> per host: when #28 adds hosts, each gets its own, in its own Environment.
+> ⚠️ **Lose a host's `RESTIC_PASSWORD` and every snapshot of that host is unreadable.** GitHub
+> never returns a secret's value, so the password-manager copy is the only one a human can read
+> back. One passphrase per host, on purpose: bpvps1's cannot open bpvps2's repository, nor the
+> reverse.
 
 ## Everyday commands
 
-All run on the host (`ssh bp-bpvps2`), as `deploy`.
+All run on the host (`ssh bp-bpvps1` or `ssh bp-bpvps2`), as `deploy`. The container is
+`backup` on both.
 
 ```bash
 # What is in the repository
@@ -164,20 +203,27 @@ docker exec backup /app/bin/backup.sh booking-staging    # just this one, exit 3
 docker exec backup /app/bin/healthcheck.sh
 docker exec backup cat /textfile/backup.prom
 
-# Restore drill: latest snapshot -> throwaway Postgres -> row counts vs live
-docker exec backup /app/bin/restore-drill.sh booking-staging
-docker exec backup /app/bin/restore-drill.sh booking-staging <snapshot-id>
+# Restore drill: latest snapshot -> throwaway copy -> compared with live
+docker exec backup /app/bin/restore-drill.sh booking-staging              # bpvps2
+docker exec backup /app/bin/restore-drill.sh wordpress                    # bpvps1
+docker exec backup /app/bin/restore-drill.sh bulwark-settings <snapshot-id>
 
 # Last night's run
 docker logs backup --since 24h
 ```
 
-The drill takes a `postgres` target's name and reads its container, database and role from
-`targets.yml`. It compares `COUNT(*)` on `tenants`, `clients`, `bookings`, `client_packages` and
-`stripe_payments` (the payments table; override with `-e DRILL_TABLES=…`), and exits non-zero
-on any difference. Its scratch container is `restore-drill-<target>`, has **no network**, and is
-removed on exit. Rows written since the snapshot read as a mismatch — for an exact comparison,
-run `backup.sh` immediately before.
+The drill takes any target's name and reads everything else from `targets.yml`:
+
+| Kind | Restored into | Pass means |
+|---|---|---|
+| `postgres` | a scratch Postgres from the live container's image, **no network** | `COUNT(*)` on the target's `drill_tables` equals live |
+| `mysql` | a scratch MariaDB/MySQL from the live container's image, **no network** | the same |
+| `volume` | a scratch directory in a throwaway container | every file is byte-identical to the live volume (mounted read-only), and there is at least one |
+
+A database target without `drill_tables` cannot be drilled — the drill refuses rather than
+counting nothing. The scratch container is `restore-drill-<target>` and is removed on exit.
+Anything written since the snapshot reads as a mismatch — for an exact comparison, run
+`backup.sh <target>` immediately before.
 
 ## Getting a dump out by hand
 
@@ -217,3 +263,4 @@ docker exec backup sh -c 'RESTIC_REPOSITORY=${RESTIC_REPOSITORY%/bpvps2}/manual 
 |---|---|---|---|
 | 2026-09-13 | booking-staging | local test repository on bpvps2, before R2 credentials existed | PASS — tenants 3, clients 6, bookings 4, client_packages 6, stripe_payments 6 |
 | 2026-09-13 | booking-staging | `db582923`, **from R2**, the first real snapshot (327,605 B dump) | PASS — tenants 3, clients 6, bookings 4, client_packages 6, stripe_payments 6 |
+| 2026-09-14 | bpvps1, all five targets | throwaway local `rest-server` repository on bpvps1, before the first deploy (#28) | PASS — wordpress: kbsb_posts 910, kbsb_postmeta 13,884, kbsb_users 30, kbsb_terms 88, kbsb_term_relationships 615, kbsb_comments 123 · bulwark-settings 22 files · bulwark-admin 4 · bulwark-admin-state 2 · traefik-certs 3, all identical |

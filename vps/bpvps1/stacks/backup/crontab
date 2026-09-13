@@ -1,0 +1,8 @@
+# Times are Asia/Kuala_Lumpur: crond reads TZ from the container environment.
+# Output goes to PID 1's stdout, so it shows in `docker logs backup`.
+# busybox crond: a `#` ANYWHERE on a line starts a comment (so no ${#var}), and it
+# silently skips a crontab not owned by root -- COPY it in, never bind-mount it.
+#
+# 04:30, an hour after bpvps2's 03:30: both hosts upload to the same bucket, and CI refuses
+# two hosts on one start time (vps/shared/check-backup-targets.py).
+30 4 * * * . /run/job.env && /app/bin/backup.sh >/proc/1/fd/1 2>&1

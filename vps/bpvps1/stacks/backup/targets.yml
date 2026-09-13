@@ -1,29 +1,69 @@
-# What bpvps1 backs up -- nothing yet. The backup stack lands on this host in #28 (mail in
-# #29); until then this file only accounts for every named volume, so none can be missed
-# when it does. `backup` is in this host's `exclude` in vps/hosts.json until a compose file
-# sits beside this one.
+# What bpvps1 backs up. Read by the backup job at every run (bin/backup.sh), so adding a
+# database or a volume is a line here plus a deploy -- never a new script.
 #
-# Format and kinds: vps/bpvps2/stacks/backup/targets.yml. Checked in CI by
-# vps/shared/check-backup-targets.py.
+# Kinds, floors and drill_tables: see vps/bpvps2/stacks/backup/targets.yml. Checked in CI by
+# vps/shared/check-backup-targets.py. Runbook: docs/backup-restore.md.
+#
+# Volume floors are du's ALLOCATED size: 4K for the directory plus at least 4K per file,
+# however small the file. So a floor here reads "at least this many files", and each is set
+# above what an empty, freshly-created volume of the same kind measures (4K).
 
-targets: []
+targets:
+  # The Kaiteki WordPress blog. Covers wordpress_wp-db-data.
+  # Floor, measured 2026-09-14: live dump 49,037,512 B; posts, postmeta, users and terms
+  # alone 18,209,402 B; schema only 66,830 B. 16M (16,777,216 B) sits below the content
+  # tables by themselves and far above an empty install. Most of the rest is Rank Math's
+  # analytics cache, which a plugin reset may legitimately empty -- so it is not in the floor.
+  - name: wordpress
+    kind: mysql
+    container: wp-db
+    database: kaitekim_blog2
+    role: root
+    floor: 16M
+    drill_tables: [kbsb_posts, kbsb_postmeta, kbsb_users, kbsb_terms, kbsb_term_relationships, kbsb_comments]
+
+  # Bulwark webmail: encrypted per-user settings, one .enc file per user. 92K live
+  # (2026-09-14). An empty volume is 4K; 32K is at least seven users' settings.
+  - name: bulwark-settings
+    kind: volume
+    volume: stalwart_bulwark-settings
+    floor: 32K
+
+  # Bulwark admin config and plugin-signing.key. 20K live: admin.json, the key, two
+  # migration markers. 12K is at least admin.json and the key.
+  - name: bulwark-admin
+    kind: volume
+    volume: stalwart_bulwark-admin
+    floor: 12K
+
+  # Bulwark admin login state and audit log. 12K live: admin-state.json and audit.log.
+  - name: bulwark-admin-state
+    kind: volume
+    volume: stalwart_bulwark-admin-state
+    floor: 8K
+
+  # Traefik's ACME account keys and issued certificates: acme.json (letsencrypt, DNS-01) and
+  # acme-tls.json (le-tls, webmail.reservetoday.app). Re-issued if lost, but only within Let's
+  # Encrypt's rate limits, and a lost account key is a new account. 80K live; 32K is both
+  # stores holding more than an account key.
+  - name: traefik-certs
+    kind: volume
+    volume: infra_traefik-letsencrypt
+    floor: 32K
 
 skip:
   - volume: stalwart_stalwart-data
     reason: >-
       NOT BACKED UP -- all mail for all three domains. An embedded store: reading it live is
       not a backup. Its method is decided in #29.
-  - volume: wordpress_wp-db-data
-    reason: NOT BACKED UP yet -- the WordPress database, to be dumped as a mysql target in #28.
-  - volume: stalwart_bulwark-settings
-    reason: NOT BACKED UP yet -- webmail branding and settings, a volume target in #28.
-  - volume: stalwart_bulwark-admin
-    reason: NOT BACKED UP yet -- webmail admin state, a volume target in #28.
-  - volume: stalwart_bulwark-admin-state
-    reason: NOT BACKED UP yet -- webmail admin state, a volume target in #28.
   - volume: stalwart_bulwark-telemetry
     reason: >-
-      Bulwark's own telemetry; not in #4's data table. #28 to confirm it holds nothing
-      worth restoring.
-  - volume: infra_traefik-letsencrypt
-    reason: NOT BACKED UP yet -- issued certificates, re-issued if lost. Captured in #28.
+      Bulwark's anonymous telemetry: .telemetry-id, state.json (consent) and logins.json
+      (login counters for that telemetry). Checked 2026-09-14 -- no settings, no mail, no
+      credentials. Bulwark creates a fresh id when it is empty.
+  - volume: backup_restic_cache
+    reason: restic's local index cache; rebuilt from the repository in R2 on the next run.
+  - volume: monitoring_textfile
+    reason: >-
+      Heartbeat metrics. backup.prom is rewritten by every successful run; losing it reads
+      as stale, which alerts -- the safe direction.

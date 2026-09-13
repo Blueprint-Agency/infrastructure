@@ -103,12 +103,15 @@ host whose on-host dirs differ from the repo: a single `booking` stack fans out 
 > 2026-09-12 (mail consolidated onto bpvps1). Everything else in it is still that July
 > snapshot — treat the Teeko hosts as history, not as inventory.
 
-> **Backups: only `booking-staging` on bpvps2 is backed up** (#26, since 2026-09-13). The
-> `backup` stack there dumps it nightly at 03:30 KL into the private R2 bucket
-> `blueprint-backups` (Blueprint account), restic-encrypted with `RESTIC_PASSWORD`. Nothing else
-> on any host has a backup yet — #28–#30. Before any production migration or import, run
-> `docker exec backup /app/bin/backup.sh`. Runbook: `docs/backup-restore.md`. `scripts/backup.sh`
-> is a same-host volume tar, **not** a backup of a running Postgres.
+> **Backups: bpvps2 (#26) and bpvps1 (#28).** Each host's `backup` stack snapshots nightly into
+> its own restic repository in the private R2 bucket `blueprint-backups` (Blueprint account),
+> each with its **own** `RESTIC_PASSWORD` — bpvps2 at 03:30 KL (`booking-staging`,
+> `traefik-certs`), bpvps1 at 04:30 (`wordpress`, the three Bulwark volumes, `traefik-certs`).
+> ⚠️ **The mail store (`stalwart-data`) is NOT backed up** — #29. The job's `Dockerfile` and
+> `bin/` are copied into both stacks and CI fails if they drift: change both in one commit.
+> Before any production migration or import, run `docker exec backup /app/bin/backup.sh`.
+> Runbook: `docs/backup-restore.md`. `scripts/backup.sh` is a same-host volume tar, **not** a
+> backup of a running Postgres.
 
 > **Monitoring: bpvps2 only so far** (#23). Its `monitoring` stack runs one Grafana Alloy
 > (`alloy`, host network, no published port) shipping host + container metrics and container

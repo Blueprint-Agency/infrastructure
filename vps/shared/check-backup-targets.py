@@ -17,6 +17,16 @@ For every host in vps/hosts.json that is in scope for backups:
      when a `postgres`/`mysql` target dumps the container that mounts it.
   3. Nothing is declared that no compose file has any more: a stale skip hides nothing, and
      a stale target is a backup that fails every night.
+  4. `drill_tables`, where a database target declares it, is a non-empty list of plain
+     identifiers -- the restore drill splices them into SQL.
+
+Across the hosts that RUN the job (a compose file beside targets.yml):
+
+  5. The job is one implementation. CI rsyncs only a stack's own directory, so each host
+     carries a copy of the Dockerfile and bin/ -- and those copies must be identical. A fix
+     that reached one host and not the other leaves that host running the bug.
+  6. No two hosts start at the same time. They upload to one bucket at night; the schedule
+     is the first line of each host's crontab.
 
 Volume names are resolved the way Docker names them -- `name:` if set, the bare key if
 external, otherwise `<project>_<key>` where the project is the stack's directory on the
@@ -41,6 +51,7 @@ NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 SIZE = re.compile(r"^[0-9]+[KMG]?$")
 VAR = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 COMPOSE_FILES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
+IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def substitute(value, env, where, problems):
@@ -111,7 +122,7 @@ def check_host(host, problems):
     where = f"{key}: {path.as_posix()}"
     targets = doc.get("targets") or []
     skips = doc.get("skip") or []
-    # A host whose backup stack has not landed yet (#28) may declare only skips. A host that
+    # A host whose backup stack has not landed yet may declare only skips. A host that
     # RUNS the job may not: a job that backs up nothing must not look like one that succeeded.
     runs_job = any((path.parent / f).is_file() for f in COMPOSE_FILES)
     if not targets and runs_job:
@@ -135,6 +146,14 @@ def check_host(host, problems):
         floor = str(t.get("floor") or "")
         if not SIZE.match(floor) or int(floor.rstrip("KMG")) == 0:
             problems.append(f"{where}: {name}: floor {floor!r} is not a size (e.g. 1024, 280K, 1M)")
+        if "drill_tables" in t:
+            drill = t["drill_tables"]
+            if kind not in ("postgres", "mysql"):
+                problems.append(f"{where}: {name}: drill_tables is for postgres and mysql targets only")
+            elif (not isinstance(drill, list) or not drill
+                  or not all(isinstance(d, str) and IDENTIFIER.match(d) for d in drill)):
+                problems.append(f"{where}: {name}: drill_tables must be a non-empty list of plain "
+                                f"table names, got {drill!r}")
 
     volumes, mounts = compose_inventory(host, problems)
 
@@ -166,12 +185,62 @@ def check_host(host, problems):
             problems.append(f"{where}: volume {vol!r} (stack {stack}) is neither backed up nor skipped")
 
 
+def job_files(stack):
+    """-> {relative path: bytes} for the parts of the job every host must share."""
+    paths = [stack / "Dockerfile"] + sorted(p for p in (stack / "bin").rglob("*") if p.is_file())
+    return {p.relative_to(stack).as_posix(): p.read_bytes() for p in paths if p.exists()}
+
+
+def schedule(crontab):
+    """-> the five schedule fields of the first job line, numbers normalised, or None.
+
+    Normalised so that `30 04` and `30 4` are recognised as the same start time."""
+    for line in crontab.read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if fields and not fields[0].startswith("#") and len(fields) > 5:
+            return " ".join(str(int(f)) if f.isdigit() else f for f in fields[:5])
+    return None
+
+
+def check_jobs(hosts, problems):
+    running = []
+    for h in hosts:
+        stack = pathlib.Path(h["dir"]) / "stacks" / "backup"
+        if not h.get("no_backups") and any((stack / f).is_file() for f in COMPOSE_FILES):
+            running.append((h["key"], stack))
+
+    copies = {key: job_files(stack) for key, stack in running}
+    for path in sorted({p for files in copies.values() for p in files}):
+        variants = {}
+        for key, files in copies.items():
+            variants.setdefault(files.get(path), []).append(key)
+        if len(variants) > 1:
+            where = "; ".join(f"{'missing' if body is None else 'one copy'} on {', '.join(keys)}"
+                              for body, keys in variants.items())
+            problems.append(f"backup job drift: stacks/backup/{path} differs between hosts ({where}) "
+                            "-- the job is one implementation, copy the change to every host")
+
+    starts = {}
+    for key, stack in running:
+        when = schedule(stack / "crontab") if (stack / "crontab").is_file() else None
+        if when is None:
+            problems.append(f"{key}: runs the backup job but {(stack / 'crontab').as_posix()} "
+                            "has no schedule")
+            continue
+        starts.setdefault(when, []).append(key)
+    for when, keys in starts.items():
+        if len(keys) > 1:
+            problems.append(f"backup schedules must stagger: {', '.join(keys)} all start at "
+                            f"'{when}' and would contend for upload bandwidth")
+
+
 def main():
     os.chdir(pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve())
     problems = []
     hosts = json.loads(pathlib.Path("vps/hosts.json").read_text(encoding="utf-8"))
     for host in hosts:
         check_host(host, problems)
+    check_jobs(hosts, problems)
     for p in problems:
         print(p)
 

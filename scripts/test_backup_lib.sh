@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Self-check for vps/bpvps2/stacks/backup/bin/lib.sh -- the pure half of the backup job.
+# bpvps1 carries an identical copy; check-backup-targets.py fails CI if the two differ.
 #
 # Wired as a CI step alongside vps/shared/test_render_ci.py. Everything that touches
 # Docker, Postgres or R2 lives in backup.sh / restore-drill.sh and is proven by running
@@ -110,6 +111,23 @@ ok   'a name that is not a safe tag is refused' 1 load_targets "$TMP/name.yml"
 says 'target names in declared order'     'booking-staging wp-db traefik-certs' target_names "$(load_targets "$TMP/good.yml")"
 says 'one target line by name'            'wp-db|mysql|wp-db|wordpress|root||1M' target_line "$(load_targets "$TMP/good.yml")" wp-db
 ok   'an unknown name has no line'        1 target_line "$(load_targets "$TMP/good.yml")" ghost
+
+# ── drill tables: what the restore drill counts is declared beside the target ────────
+cat > "$TMP/drill.yml" <<'YML'
+targets:
+  - {name: booking-staging, kind: postgres, container: c, database: d, role: postgres, floor: 1, drill_tables: [tenants, clients]}
+  - {name: wp-db, kind: mysql, container: c, database: d, role: root, floor: 1}
+  - {name: evil, kind: mysql, container: c, database: d, role: root, floor: 1, drill_tables: ["x; drop table y"]}
+YML
+says 'declared drill tables, in order'    'tenants clients' drill_tables "$TMP/drill.yml" booking-staging
+ok   'a target without drill tables is refused' 1 drill_tables "$TMP/drill.yml" wp-db
+says 'the refusal names the target'       'wp-db' drill_tables "$TMP/drill.yml" wp-db
+ok   'a table name that is not an identifier is refused' 1 drill_tables "$TMP/drill.yml" evil
+
+# The count query each engine understands: one row per table, "<table> <count>".
+says 'postgres count query'  "select 'tenants', count(*) from \"tenants\" union all select 'clients', count(*) from \"clients\"" count_sql postgres 'tenants clients'
+says 'mysql count query'     "select 'wp_posts', count(*) from \`wp_posts\` union all select 'wp_users', count(*) from \`wp_users\`" count_sql mysql 'wp_posts wp_users'
+ok   'an unknown engine is refused'      1 count_sql redis 'a'
 
 # ── floor size: an empty database is a failure, not a small backup ───────────────────
 says 'plain bytes'                        '1024' parse_size 1024

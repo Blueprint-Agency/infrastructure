@@ -10,6 +10,9 @@
 # heartbeat, so an empty database raises the same alarm as a missing backup. Bytes, or
 # K / M / G (binary). Set it above what an EMPTY instance of the same thing measures.
 #
+# A postgres/mysql target may declare `drill_tables`: the tables bin/restore-drill.sh counts
+# against live after restoring it. Without it, that target cannot be drilled.
+#
 # Every named volume in this host's compose files is either backed up here -- directly, or
 # because a postgres/mysql target dumps the container that mounts it -- or listed under
 # `skip:` with a reason. vps/shared/check-backup-targets.py enforces that in CI.
@@ -30,16 +33,23 @@ targets:
     database: yoga-sadhana
     role: postgres
     floor: 280K
+    # stripe_payments is the payments table.
+    drill_tables: [tenants, clients, bookings, client_packages, stripe_payments]
+
+  # Traefik's ACME account key and issued certificates: acme.json (letsencrypt, DNS-01 for
+  # teeko.ai) and acme-tls.json (le-tls, the reservetoday.app booking names). Re-issued if
+  # lost, but only within Let's Encrypt's rate limits. 92K live (2026-09-14), two ~41 KB
+  # stores; an empty volume is 4K, and 32K is both stores holding more than an account key.
+  - name: traefik-certs
+    kind: volume
+    volume: infra_traefik-letsencrypt
+    floor: 32K
 
 skip:
   - volume: booking_prod_pgdata
     reason: >-
       booking-prod is fresh -- seed data only, no studio on it yet (#26 backed up staging
       alone for this reason). Add a postgres target here before the first studio moves to prod.
-  - volume: infra_traefik-letsencrypt
-    reason: >-
-      Traefik's issued certificates, which it re-issues on its own if lost. Captured on
-      both in-scope hosts in #28.
   - volume: backup_restic_cache
     reason: restic's local index cache; rebuilt from the repository in R2 on the next run.
   - volume: monitoring_alloy_data
