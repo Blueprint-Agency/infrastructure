@@ -455,7 +455,7 @@ and only indexed properties filter. There is no `changes`/`queryChanges` for `x:
 | Domains | `kaiteki.my` (id `b`), `blueprintdigital.my` (`c`), `reservetoday.app` (`d`) — all with automatic DKIM |
 | Administrator | **`admin@blueprintdigital.my`** (id `t`). `admin@kaiteki.my` (id `b`) is a plain `User` mailbox again. The recovery admin in `.env` is unchanged. |
 | `blueprintdigital.my` mailboxes | `admin@` (`t`), `chriskke@` (`u`), `danielchua@` (`v`), `yuchen@` (`w`) — the last three re-created from bpvps2 in #9 with fresh passwords (`MAIL_PASSWORD_*` in the repo `.env`) |
-| `reservetoday.app` mailboxes | `hello@` (`x`, #15), `admin@` (`y`, #10) — both plain `User`; the domain's DNS went live 2026-09-12 (#10) |
+| `reservetoday.app` mailboxes | `hello@` (`x`, #15), `admin@` (`y`, #10), `portal@` (`z`, 2026-09-13) — all plain `User`; the domain's DNS went live 2026-09-12 (#10) |
 | `defaultHostname` | **`mail.blueprintdigital.my`** since #9 (2026-09-12), moved together with the A records — see the hostname warning |
 | `useXForwarded` | `true` (was already) |
 | Allowed IPs | `172.16.0.0/12` (Docker default pool; replaced the `/16`), `60.54.118.137` (Kaiteki office) |
