@@ -77,7 +77,7 @@ compose` is still SSH.
 | `bp-vps2-prod` | Production | 4 vCPU / 16GB / 200GB |
 | `bp-vps3-prod` | Production | 4 vCPU / 16GB / 200GB |
 | `bp-bpvps1` | Kaiteki (legacy + revamp) + **the mail platform** (all three domains) | 187.127.122.41 |
-| `bp-bpvps2` | Booking-system + its `backup` stack — no mail since 2026-09-12 (#12) | 187.127.207.82 |
+| `bp-bpvps2` | Booking-system + its `backup` and `monitoring` stacks — no mail since 2026-09-12 (#12) | 187.127.207.82 |
 
 SSH key: `~/.ssh/infra_ed25519`. All hosts log in as **`deploy`**, not root — `deploy` is in the `docker` group and owns `/root/stacks`. Hosts defined in `~/.ssh/config`.
 
@@ -109,6 +109,13 @@ host whose on-host dirs differ from the repo: a single `booking` stack fans out 
 > on any host has a backup yet — #28–#30. Before any production migration or import, run
 > `docker exec backup /app/bin/backup.sh`. Runbook: `docs/backup-restore.md`. `scripts/backup.sh`
 > is a same-host volume tar, **not** a backup of a running Postgres.
+
+> **Monitoring: bpvps2 only so far** (#23). Its `monitoring` stack runs one Grafana Alloy
+> (`alloy`, host network, no published port) shipping host + container metrics and container
+> logs to Grafana Cloud. What ships is `metrics.allowlist` in that stack; dashboards and alert
+> rules are `grafana/`, applied by `scripts/grafana-apply.py` — never edited in the UI. **A new
+> container on a monitored host means a line in `grafana/rules/containers.yml`**, or CI fails
+> (`vps/shared/check-monitoring.py`). Runbook: `docs/monitoring.md`.
 
 > **What a host backs up is `vps/<host>/stacks/backup/targets.yml`** (#27) — every host has
 > one, and CI fails if a named volume in that host's compose files is neither in it nor

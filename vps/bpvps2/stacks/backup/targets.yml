@@ -42,6 +42,10 @@ skip:
       all five hosts in #28.
   - volume: backup_restic_cache
     reason: restic's local index cache; rebuilt from the repository in R2 on the next run.
+  - volume: monitoring_alloy_data
+    reason: >-
+      Alloy's log read positions and metrics WAL. Losing it re-ships a few minutes of recent
+      logs once and drops unsent samples; the data itself lives in Grafana Cloud.
   - volume: monitoring_textfile
     reason: >-
       Heartbeat metrics. backup.prom is rewritten by every successful run; losing it reads

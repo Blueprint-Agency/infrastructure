@@ -1,0 +1,191 @@
+// Grafana Alloy on bpvps2 -- host + container metrics and container logs, shipped to
+// Grafana Cloud. Outbound only: no port is published, and the HTTP server listens on the
+// container's own loopback. Runbook: docs/monitoring.md.
+//
+// What is collected is decided in two reviewed places, both in this directory:
+//   metrics  metrics.allowlist -- one metric name per line, KEEP only those
+//   logs     loki.process "select" below -- every container, minus Traefik access logs
+//
+// The labels every signal carries, and which panels and rules filter on:
+//   host             the host's hostname (the agent runs in the host network namespace)
+//   container        booking-be-staging, booking-db-prod, traefik, ...
+//   compose_project  the stack DIRECTORY on the host: booking-staging vs booking-prod
+//   compose_service  the service key: booking-be, db-booking, ...
+
+logging {
+  // Alloy's own log goes to Grafana Cloud with every other container's; info is chatty.
+  level = "warn"
+}
+
+// ── Metrics ──────────────────────────────────────────────────────────────────
+
+prometheus.exporter.unix "host" {
+  procfs_path    = "/host/proc"
+  sysfs_path     = "/host/sys"
+  rootfs_path    = "/rootfs"
+  set_collectors = ["cpu", "meminfo", "filesystem", "netdev"]
+
+  filesystem {
+    // Real disks only: overlay, tmpfs and the kernel pseudo-filesystems are per-container
+    // or per-boot noise, and each would be a series per mount.
+    fs_types_exclude     = "^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs|tmpfs)$"
+    mount_points_exclude = "^/(dev|proc|run|sys|snap|var/lib/docker)($|/)"
+  }
+
+  netdev {
+    // One veth per container would duplicate what cadvisor already reports per container.
+    device_exclude = "^(lo|veth.*|docker.*|br-.*)$"
+  }
+}
+
+prometheus.exporter.cadvisor "containers" {
+  docker_host  = "unix:///var/run/docker.sock"
+  docker_only  = true
+  // Every container label as a series label is the classic cardinality blow-up. Keep the
+  // two that tell booking-staging from booking-prod, and nothing else.
+  store_container_labels       = false
+  allowlisted_container_labels = ["com.docker.compose.project", "com.docker.compose.service"]
+  enabled_metrics              = ["cpu", "memory", "network", "diskIO"]
+}
+
+// 60 s: Grafana Cloud's free-tier series are priced at one data point per minute.
+prometheus.scrape "host" {
+  targets         = prometheus.exporter.unix.host.targets
+  scrape_interval = "60s"
+  forward_to      = [prometheus.relabel.allowlist.receiver]
+}
+
+prometheus.scrape "containers" {
+  targets         = prometheus.exporter.cadvisor.containers.targets
+  scrape_interval = "60s"
+  forward_to      = [prometheus.relabel.allowlist.receiver]
+}
+
+local.file "allowlist" {
+  filename = "/etc/alloy/metrics.allowlist"
+}
+
+prometheus.relabel "allowlist" {
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+
+  // An allowlist, not a denylist: a new metric family costs nothing until someone adds its
+  // name to metrics.allowlist -- and CI (vps/shared/check-monitoring.py) refuses a name that
+  // no panel or rule reads. Relabel regexes are anchored, so "a|b" keeps exactly a and b.
+  rule {
+    source_labels = ["__name__"]
+    regex         = string.replace(string.replace(string.trim_space(local.file.allowlist.content), "\r", ""), "\n", "|")
+    action        = "keep"
+  }
+
+  // cadvisor also reports the root cgroup, with an empty container name. It is the host
+  // total, which node_* already covers; kept, it is an unnamed line on every container panel.
+  rule {
+    source_labels = ["__name__", "name"]
+    regex         = "container_.+;"
+    action        = "drop"
+  }
+
+  rule {
+    target_label = "host"
+    replacement  = constants.hostname
+  }
+
+  rule {
+    source_labels = ["name"]
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["container_label_com_docker_compose_project"]
+    target_label  = "compose_project"
+  }
+
+  rule {
+    source_labels = ["container_label_com_docker_compose_service"]
+    target_label  = "compose_service"
+  }
+
+  // id is the cgroup path and image changes on every deploy: both would churn series.
+  rule {
+    action = "labeldrop"
+    regex  = "id|name|image|instance|job|container_label_.+"
+  }
+}
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_PROM_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_PROM_USER")
+      password = sys.env("GRAFANA_CLOUD_API_TOKEN")
+    }
+  }
+}
+
+// ── Logs ─────────────────────────────────────────────────────────────────────
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "logs" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "compose_project"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "compose_service"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.logs.output
+  labels     = {host = constants.hostname}
+  forward_to = [loki.process.select.receiver]
+}
+
+loki.process "select" {
+  forward_to = [loki.write.grafana_cloud.receiver]
+
+  // Traefik ACCESS logs are dropped; Traefik's own log (routers, ACME, errors) is kept.
+  // A busy proxy's access log can spend the whole monthly log allowance, and neither Traefik
+  // incident in this repo's history was diagnosed from it -- both were in the error log.
+  // bpvps2's Traefik does not enable --accesslog today; this makes turning it on free
+  // rather than a surprise on the bill. Both formats: common log format, and JSON.
+  stage.match {
+    selector = "{container=\"traefik\"}"
+
+    stage.drop {
+      expression          = "^\\S+ \\S+ \\S+ \\[[^\\]]+\\] \"[A-Z]+ "
+      drop_counter_reason = "traefik_access_log"
+    }
+
+    stage.drop {
+      expression          = "\"RequestMethod\":"
+      drop_counter_reason = "traefik_access_log"
+    }
+  }
+}
+
+loki.write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_LOKI_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_LOKI_USER")
+      password = sys.env("GRAFANA_CLOUD_API_TOKEN")
+    }
+  }
+}

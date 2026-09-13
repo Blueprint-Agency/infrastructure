@@ -1,0 +1,65 @@
+# monitoring — Grafana Alloy: host + container metrics and container logs to Grafana Cloud.
+#
+# What is collected: metrics.allowlist (metrics) and config.alloy (logs), next to this file.
+# Adding a metric is a line in the allowlist plus the panel or rule that reads it -- CI
+# (vps/shared/check-monitoring.py) fails a name nothing reads, and a read name not listed.
+#
+# Runbook (entitlements, budget, how to silence, the canary tests): docs/monitoring.md.
+#
+# Outbound only. No host port, no Traefik, no network of its own. Everything it reads is
+# mounted read-only; it runs as root inside the container to read /proc, /sys, the cgroup
+# tree and the Docker socket, which is what `deploy`'s docker group already grants.
+services:
+  alloy:
+    build: .
+    image: blueprint-alloy:local
+    pull_policy: build
+    # Not keyed on ${ENV_NAME}: one agent per HOST, covering every instance on it.
+    container_name: alloy
+    restart: unless-stopped
+    # The HOST's network namespace, for two reasons. /proc/net is per network namespace, so
+    # in a bridge network node_network_* reports the container's own veth -- a flat line of a
+    # few KB (measured 2026-09-13). And constants.hostname becomes the host's real hostname,
+    # which is the `host` label on every metric and log line.
+    network_mode: host
+    command:
+      - run
+      # Host loopback only: the debug UI answers on the host itself and on no interface.
+      # Nothing is published, and 80/443 are the only ports the firewall lets in anyway.
+      - --server.http.listen-addr=127.0.0.1:12345
+      - --storage.path=/var/lib/alloy/data
+      - --disable-reporting
+      - /etc/alloy/config.alloy
+    environment:
+      TZ: Asia/Kuala_Lumpur
+      # From ci/env.ci, rendered by CI; a blank one fails the deploy -- an agent with an
+      # empty token starts happily and ships nothing.
+      GRAFANA_CLOUD_PROM_URL: ${GRAFANA_CLOUD_PROM_URL}
+      GRAFANA_CLOUD_PROM_USER: ${GRAFANA_CLOUD_PROM_USER}
+      GRAFANA_CLOUD_LOKI_URL: ${GRAFANA_CLOUD_LOKI_URL}
+      GRAFANA_CLOUD_LOKI_USER: ${GRAFANA_CLOUD_LOKI_USER}
+      GRAFANA_CLOUD_API_TOKEN: ${GRAFANA_CLOUD_API_TOKEN}
+    # cadvisor walks the host cgroup tree; with a private cgroup namespace it sees only its own.
+    cgroup: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /sys:/sys:ro
+      - /:/rootfs:ro,rslave
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Docker 29 stores images in containerd's snapshotter, and cadvisor asks containerd
+      # about every container. Without this it logs "cannot unix dial containerd" per
+      # container, every minute (seen on bpvps2, 2026-09-13).
+      - /run/containerd/containerd.sock:/run/containerd/containerd.sock:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+      # Log read positions and the metrics WAL: a restart resumes rather than re-ships.
+      - alloy_data:/var/lib/alloy/data
+    # Guard rails on a 1 vCPU / 4 GB host that serves the booking API. Measured use is in
+    # docs/monitoring.md; these are ceilings, not the expected figure.
+    cpus: 0.5
+    mem_limit: 384m
+
+volumes:
+  alloy_data:
+    name: monitoring_alloy_data

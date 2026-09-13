@@ -6,6 +6,7 @@ rather than render an empty string. That is the whole reason this script exists
 instead of envsubst, which happily substitutes blanks.
 """
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -59,5 +60,19 @@ for env in ({}, {"N8N_DB_PASSWORD": ""}):
     r = run({".env.db-n8n": "PASSWORD=@@N8N_DB_PASSWORD@@\n"}, env, out)
     assert r.returncode == 1, f"expected failure, got {r.returncode}"
     assert "N8N_DB_PASSWORD" in r.stderr and ".env.db-n8n" in r.stderr, r.stderr
+
+# The monitoring agent's real template (#23). An agent with a blank token starts happily and
+# ships nothing, so every one of its markers must fail the deploy when missing.
+real = SCRIPT.parents[2] / "vps" / "bpvps2" / "stacks" / "monitoring"
+markers = sorted(set(re.findall(r"@@([A-Z0-9_]+)@@", (real / "ci" / "env.ci").read_text())))
+assert "GRAFANA_CLOUD_API_TOKEN" in markers, markers
+full = {m: "x" for m in markers}
+r = subprocess.run([sys.executable, str(SCRIPT), str(real), tempfile.mkdtemp()],
+                   capture_output=True, text=True, env={**full, "PATH": ""})
+assert r.returncode == 0, r.stderr
+for m in markers:
+    r = subprocess.run([sys.executable, str(SCRIPT), str(real), tempfile.mkdtemp()],
+                       capture_output=True, text=True, env={**full, m: "", "PATH": ""})
+    assert r.returncode == 1 and m in r.stderr, f"blank {m} should fail the deploy: {r.stderr}"
 
 print("render-ci.py: all checks passed")

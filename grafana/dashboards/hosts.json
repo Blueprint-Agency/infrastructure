@@ -1,0 +1,114 @@
+{
+  "uid": "bp-hosts",
+  "title": "Hosts",
+  "description": "One host: CPU, memory, disk and network, per host and per container, plus its container logs. Copy of record is grafana/dashboards/hosts.json in Blueprint-Agency/infrastructure; applied by scripts/grafana-apply.py. Edits made in the UI are overwritten on the next apply.",
+  "tags": ["infrastructure"],
+  "timezone": "Asia/Kuala_Lumpur",
+  "schemaVersion": 39,
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "host",
+        "label": "Host",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+        "query": { "query": "label_values(node_cpu_seconds_total, host)", "refId": "host" },
+        "refresh": 2
+      },
+      {
+        "name": "project",
+        "label": "Compose project",
+        "description": "The stack directory on the host -- booking-staging and booking-prod are different instances.",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+        "query": { "query": "label_values(container_last_seen{host=\"$host\"}, compose_project)", "refId": "project" },
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    { "type": "row", "title": "Host", "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 } },
+    {
+      "type": "timeseries", "title": "CPU used", "gridPos": { "x": 0, "y": 1, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 } },
+      "targets": [ { "refId": "A", "legendFormat": "{{host}}",
+        "expr": "100 * (1 - avg by (host) (rate(node_cpu_seconds_total{host=\"$host\", mode=\"idle\"}[5m])))" } ]
+    },
+    {
+      "type": "timeseries", "title": "Memory used", "gridPos": { "x": 6, "y": 1, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 } },
+      "targets": [ { "refId": "A", "legendFormat": "{{host}}",
+        "expr": "100 * (1 - node_memory_MemAvailable_bytes{host=\"$host\"} / node_memory_MemTotal_bytes{host=\"$host\"})" } ]
+    },
+    {
+      "type": "timeseries", "title": "Disk used", "gridPos": { "x": 12, "y": 1, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 } },
+      "targets": [ { "refId": "A", "legendFormat": "{{mountpoint}}",
+        "expr": "100 * (1 - node_filesystem_avail_bytes{host=\"$host\"} / node_filesystem_size_bytes{host=\"$host\"})" } ]
+    },
+    {
+      "type": "timeseries", "title": "Network", "gridPos": { "x": 18, "y": 1, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{device}} in",
+          "expr": "rate(node_network_receive_bytes_total{host=\"$host\"}[5m])" },
+        { "refId": "B", "legendFormat": "{{device}} out",
+          "expr": "-rate(node_network_transmit_bytes_total{host=\"$host\"}[5m])" }
+      ]
+    },
+    { "type": "row", "title": "Containers", "gridPos": { "x": 0, "y": 9, "w": 24, "h": 1 } },
+    {
+      "type": "timeseries", "title": "CPU by container", "gridPos": { "x": 0, "y": 10, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0 } },
+      "targets": [ { "refId": "A", "legendFormat": "{{container}}",
+        "expr": "sum by (container) (rate(container_cpu_usage_seconds_total{host=\"$host\", compose_project=~\"$project\"}[5m]))" } ]
+    },
+    {
+      "type": "timeseries", "title": "Memory by container", "gridPos": { "x": 12, "y": 10, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } },
+      "targets": [ { "refId": "A", "legendFormat": "{{container}}",
+        "expr": "sum by (container) (container_memory_working_set_bytes{host=\"$host\", compose_project=~\"$project\"})" } ]
+    },
+    {
+      "type": "timeseries", "title": "Disk I/O by container", "gridPos": { "x": 0, "y": 18, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{container}} read",
+          "expr": "sum by (container) (rate(container_fs_reads_bytes_total{host=\"$host\", compose_project=~\"$project\"}[5m]))" },
+        { "refId": "B", "legendFormat": "{{container}} write",
+          "expr": "-sum by (container) (rate(container_fs_writes_bytes_total{host=\"$host\", compose_project=~\"$project\"}[5m]))" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Network by container", "gridPos": { "x": 12, "y": 18, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{container}} in",
+          "expr": "sum by (container) (rate(container_network_receive_bytes_total{host=\"$host\", compose_project=~\"$project\"}[5m]))" },
+        { "refId": "B", "legendFormat": "{{container}} out",
+          "expr": "-sum by (container) (rate(container_network_transmit_bytes_total{host=\"$host\", compose_project=~\"$project\"}[5m]))" }
+      ]
+    },
+    { "type": "row", "title": "Logs", "gridPos": { "x": 0, "y": 26, "w": 24, "h": 1 } },
+    {
+      "type": "logs", "title": "Container logs", "gridPos": { "x": 0, "y": 27, "w": 24, "h": 14 },
+      "datasource": { "type": "loki", "uid": "grafanacloud-logs" },
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" },
+      "targets": [ { "refId": "A",
+        "expr": "{host=\"$host\", compose_project=~\"$project\"}" } ]
+    }
+  ]
+}

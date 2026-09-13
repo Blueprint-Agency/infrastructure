@@ -1,1 +1,4 @@
 *.sh text eol=lf
+# Read verbatim by Grafana Alloy on Linux hosts: the allowlist's lines become one regex.
+*.alloy text eol=lf
+*.allowlist text eol=lf

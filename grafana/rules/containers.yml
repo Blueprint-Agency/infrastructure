@@ -1,0 +1,68 @@
+# Grafana-managed alert rules, in Grafana's file-provisioning format. Applied to Grafana
+# Cloud by scripts/grafana-apply.py -- this file is the copy of record, not the web UI.
+#
+# container-down-<host> declares, by name, every container that host's compose files
+# define. CI (vps/shared/check-monitoring.py) fails when a compose file gains a container
+# this rule does not name, or when a selector lacks its host matcher. The agent's own
+# container is exempt: an agent cannot report its own absence. If the agent dies, every
+# container below goes absent at once and this rule fires for all of them -- read that
+# pattern as "monitoring is down", not as six outages.
+#
+# Why absent_over_time and not a rule over container_last_seen as a whole: a stopped
+# container's series simply stops, and a multi-dimensional Grafana rule treats a vanished
+# series as resolved, never as firing. Only a matcher that names the container can notice
+# that it is gone. Samples arrive every 60 s, so 3m is three missed scrapes.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: containers
+    folder: Monitoring
+    interval: 1m
+    rules:
+      - uid: container-down-bpvps2
+        title: Container down on bpvps2
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                absent_over_time(container_last_seen{host="bpvps2", container="traefik"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps2", container="booking-be-staging"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps2", container="booking-db-staging"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps2", container="booking-be-prod"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps2", container="booking-db-prod"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps2", container="backup"}[3m])
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        # Every container present -> the query returns nothing. That is the healthy state.
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: critical
+          host: bpvps2
+        annotations:
+          summary: "{{ $labels.container }} on {{ $labels.host }} has reported no metrics for 3 minutes"
+          description: >-
+            The container is stopped, crash-looping, or was removed. booking-*-staging holds
+            the real studio data; booking-*-prod is the fresh instance. If every container on
+            the host fires at once, the monitoring agent (container `alloy`) or the host
+            itself is down instead. Runbook: docs/monitoring.md.

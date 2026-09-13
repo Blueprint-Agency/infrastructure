@@ -94,6 +94,23 @@ jobs:
           python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
           python3 vps/shared/test_check_backup_targets.py
 
+      # Monitoring agrees with itself: every allowlisted metric backs a panel or rule under
+      # grafana/, every metric a panel or rule reads is allowlisted, and each monitored host's
+      # container-down rule names exactly the containers its compose files define. Then the
+      # grafana-apply translation, and every config.alloy validated by the Alloy tag its own
+      # Dockerfile pins -- a typo'd argument otherwise surfaces as a crash-looping agent.
+      - name: Check monitoring allowlist, dashboards, rules and agent config
+        run: |
+          python3 vps/shared/test_check_monitoring.py
+          python3 scripts/test_grafana_apply.py
+          for cfg in vps/*/stacks/monitoring/config.alloy; do
+            [ -f "$cfg" ] || continue
+            dir=$(dirname "$cfg")
+            image=$(sed -n 's/^FROM //p' "$dir/Dockerfile")
+            echo "--- $cfg against $image"
+            docker run --rm -v "$PWD/$dir:/etc/alloy:ro" "$image" validate /etc/alloy/config.alloy
+          done
+
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -174,6 +191,11 @@ jobs:
           R2_BACKUP_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_ACCESS_KEY_ID }}
           R2_BACKUP_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_SECRET_ACCESS_KEY }}
           RESTIC_PASSWORD: ${{ secrets.RESTIC_PASSWORD }}
+          GRAFANA_CLOUD_PROM_URL: ${{ vars.GRAFANA_CLOUD_PROM_URL }}
+          GRAFANA_CLOUD_PROM_USER: ${{ vars.GRAFANA_CLOUD_PROM_USER }}
+          GRAFANA_CLOUD_LOKI_URL: ${{ vars.GRAFANA_CLOUD_LOKI_URL }}
+          GRAFANA_CLOUD_LOKI_USER: ${{ vars.GRAFANA_CLOUD_LOKI_USER }}
+          GRAFANA_CLOUD_API_TOKEN: ${{ secrets.GRAFANA_CLOUD_API_TOKEN }}
         run: |
           RSH="ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=no"
 
