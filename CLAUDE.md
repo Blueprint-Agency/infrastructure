@@ -106,8 +106,10 @@ host whose on-host dirs differ from the repo: a single `booking` stack fans out 
 > **Backups: bpvps2 (#26) and bpvps1 (#28).** Each host's `backup` stack snapshots nightly into
 > its own restic repository in the private R2 bucket `blueprint-backups` (Blueprint account),
 > each with its **own** `RESTIC_PASSWORD` — bpvps2 at 03:30 KL (`booking-staging`,
-> `traefik-certs`), bpvps1 at 04:30 (`wordpress`, the three Bulwark volumes, `traefik-certs`).
-> ⚠️ **The mail store (`stalwart-data`) is NOT backed up** — #29. The job's `Dockerfile` and
+> `traefik-certs`), bpvps1 at 04:30 (`mail-store`, `wordpress`, the three Bulwark volumes,
+> `traefik-certs`). ⚠️ **`mail-store` stops Stalwart nightly** (#29) — 4 s measured, ~13 min worst case — v0.16.21
+> has no online export; the decision, the failure modes and the round-trip drill are "The mail
+> store" in the runbook. Never back it up as a plain `volume` target. The job's `Dockerfile` and
 > `bin/` are copied into both stacks and CI fails if they drift: change both in one commit.
 > Before any production migration or import, run `docker exec backup /app/bin/backup.sh`.
 > Runbook: `docs/backup-restore.md`. `scripts/backup.sh` is a same-host volume tar, **not** a

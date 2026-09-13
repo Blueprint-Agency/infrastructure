@@ -41,6 +41,10 @@ services:
       # Healthcheck limit: a day, plus an hour for tonight's run to finish before the
       # previous success counts as missed.
       BACKUP_MAX_AGE: "90000"
+      # mail-store (kind stalwart) stops Stalwart for its snapshot. The longest that stop may
+      # last, in seconds, before the snapshot is abandoned and Stalwart started regardless.
+      # Measured pause: docs/backup-restore.md, "The mail store".
+      BACKUP_PAUSE_LIMIT: "600"
       # From ci/env.ci, rendered by CI from the bpvps1 Environment; a blank one fails the deploy.
       RESTIC_REPOSITORY: s3:https://${R2_BACKUP_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BACKUP_BUCKET}/bpvps1
       RESTIC_PASSWORD: ${RESTIC_PASSWORD}

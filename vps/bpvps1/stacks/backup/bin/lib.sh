@@ -53,8 +53,10 @@ load_targets() {
         if ($3 == "" || $4 == "" || $5 == "") bad($1 ": " $2 " needs container, database and role")
       } else if ($2 == "volume") {
         if ($6 == "") bad($1 ": volume needs a volume")
+      } else if ($2 == "stalwart") {
+        if ($3 == "" || $6 == "") bad($1 ": stalwart needs container (the server it stops) and volume")
       } else {
-        bad($1 ": unknown kind \x27" $2 "\x27 (postgres, mysql or volume)")
+        bad($1 ": unknown kind \x27" $2 "\x27 (postgres, mysql, volume or stalwart)")
       }
     }
     END {
@@ -261,25 +263,81 @@ check_dump_role() {
   return 1
 }
 
-# compare_counts <live> <restored>   each: lines of "<table> <count>"
+# compare_counts <live> <restored>   each: lines of "<key> <value>..."
 #
-# Every table in <live> must appear in <restored> with the same count. An empty <live>
-# fails: a drill that compared nothing proved nothing.
+# "<table> <count>" for the database drills, "<account> <messages> <bytes>" for the mail
+# drill: everything after the key must match. Every key in <live> must appear in <restored>
+# with the same values, and <restored> may hold no key <live> lacks. An empty <live> fails:
+# a drill that compared nothing proved nothing.
 compare_counts() {
   # Passed via the environment, not -v: some awks reject a newline inside -v.
   printf '%s\n' "$1" | RESTORED="$2" awk '
+    function rest(line) { sub(/^[^ ]+ +/, "", line); return line }
     BEGIN {
       n = split(ENVIRON["RESTORED"], lines, "\n")
-      for (i = 1; i <= n; i++) if (split(lines[i], f, " ") == 2) got[f[1]] = f[2]
+      for (i = 1; i <= n; i++) if (split(lines[i], f, " ") >= 2) got[f[1]] = rest(lines[i])
     }
-    NF == 2 {
+    NF >= 2 {
       seen++
-      if (!($1 in got)) { printf "MISMATCH %s: live=%s restored=(missing)\n", $1, $2; bad++ }
-      else if (got[$1] != $2) { printf "MISMATCH %s: live=%s restored=%s\n", $1, $2, got[$1]; bad++ }
-      else printf "ok       %s: %s\n", $1, $2
+      want = rest($0)
+      live[$1] = 1
+      if (!($1 in got)) { printf "MISMATCH %s: live=%s restored=(missing)\n", $1, want; bad++ }
+      else if (got[$1] != want) { printf "MISMATCH %s: live=%s restored=%s\n", $1, want, got[$1]; bad++ }
+      else printf "ok       %s: %s\n", $1, want
     }
     END {
       if (!seen) { print "nothing to compare: no live counts" > "/dev/stderr"; exit 1 }
+      for (k in got) if (!(k in live)) { printf "MISMATCH %s: live=(missing) restored=%s\n", k, got[k]; bad++ }
       exit bad ? 1 : 0
     }'
+}
+
+# ── JMAP, for the stalwart kind ──────────────────────────────────────────────────────
+# The mail drill counts every account's messages and bytes on the live server and on the
+# restored copy -- the numbers scripts/mail-inventory.py records. These read one response
+# each; bin/stalwart.sh makes the requests.
+
+# jmap_error <json>  ->  rc 1, naming the problem, unless <json> is a JMAP response with no
+# method error in it
+jmap_error() {
+  _err=$(printf '%s' "$1" | yq -p json -r '
+    (.methodResponses // error("no methodResponses")) | map(select(.[0] == "error") | .[1].type) | join(",")
+  ' 2>/dev/null) || { echo "jmap: not a JMAP response: $(printf '%s' "$1" | head -c 200)" >&2; return 1; }
+  [ -z "$_err" ] || { echo "jmap: method error: $_err" >&2; return 1; }
+}
+
+# jmap_principals <Principal/get response>  ->  "<id> <name>" per account
+#
+# Refused when the list is empty: an inventory of nobody compares equal to another one.
+jmap_principals() {
+  jmap_error "$1" || return 1
+  _p=$(printf '%s' "$1" | yq -p json -r '.methodResponses[0][1].list[] | .id + " " + (.name // .email // .id)') || return 1
+  [ -n "$_p" ] || { echo "jmap: Principal/get listed no accounts" >&2; return 1; }
+  printf '%s\n' "$_p"
+}
+
+# jmap_page <Email/query + Email/get(size) response>  ->  "<total> <messages> <bytes>"
+#
+# total is the account's whole message count; messages and bytes are this page's.
+jmap_page() {
+  jmap_error "$1" || return 1
+  _page=$(printf '%s' "$1" | yq -p json -r '
+    select(.methodResponses[0][0] == "Email/query" and .methodResponses[1][0] == "Email/get")
+    | [.methodResponses[0][1].total, (.methodResponses[1][1].list | length),
+     (.methodResponses[1][1].list | map(.size // 0) | .[] as $x ireduce (0; . + $x))]
+    | map(tostring) | join(" ")' 2>/dev/null)
+  case $_page in
+    *[!0-9\ ]* | '' | *' '*' '*' '*) ;;
+    *' '*' '*) echo "$_page"; return 0 ;;
+  esac
+  echo "jmap: not an Email/query + Email/get page: $(printf '%s' "$1" | head -c 200)" >&2
+  return 1
+}
+
+# restic_snapshot_id <restic backup --json output>  ->  the id of the snapshot it wrote
+restic_snapshot_id() {
+  printf '%s\n' "$1" | awk '
+    /"message_type":"summary"/ && match($0, /"snapshot_id":"[0-9a-f]+"/) {
+      print substr($0, RSTART + 15, RLENGTH - 16); found = 1 }
+    END { if (!found) { print "restic: no snapshot id in the backup output" > "/dev/stderr"; exit 1 } }'
 }

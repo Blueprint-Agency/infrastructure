@@ -4,4 +4,11 @@
 set -eu
 umask 077
 export -p > /run/job.env
+
+# A backup that died while a mail server was stopped for it -- this container killed, OOM,
+# the host rebooted -- left that server stopped, and `restart: unless-stopped` will not
+# bring back a container that was stopped on purpose. This start is the first chance to.
+. /app/bin/stalwart.sh
+restart_stopped || true
+
 exec crond -f -l 8

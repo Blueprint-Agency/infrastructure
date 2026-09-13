@@ -346,6 +346,12 @@ docker compose pull stalwart && docker compose up -d stalwart
 > file there, pipe it through a container:
 > `cat file | ssh bp-bpvps1 "docker run --rm -i -v /root/stacks/stalwart:/s alpine sh -c 'cat > /s/file'"`
 
+> **Nightly backups are not this tar.** The `backup` stack's `mail-store` target stops
+> Stalwart for a few seconds at 04:30 KL and snapshots this volume to R2 (#29);
+> `docker exec backup /app/bin/restore-drill.sh mail-store` proves it round-trips.
+> `docs/backup-restore.md`, "The mail store". A pre-bump tar is still worth taking — it is
+> local and minutes old.
+
 ### Proving a backup is restorable
 
 `tar -tf` proves the archive is readable, not that Stalwart can open what is inside it. Restore

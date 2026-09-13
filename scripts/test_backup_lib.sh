@@ -103,6 +103,14 @@ printf 'targets:\n  - {name: a, kind: postgres, container: c, database: d, floor
 ok   'postgres without a role is refused' 1 load_targets "$TMP/role.yml"
 printf 'targets:\n  - {name: a, kind: volume, floor: 1}\n' > "$TMP/vol.yml"
 ok   'volume without a volume is refused' 1 load_targets "$TMP/vol.yml"
+printf 'targets:\n  - {name: mail-store, kind: stalwart, container: stalwart, volume: stalwart_stalwart-data, floor: 4G}\n' > "$TMP/stalwart.yml"
+ok   'a stalwart target loads'            0 load_targets "$TMP/stalwart.yml"
+says 'stalwart line carries container and volume' 'mail-store|stalwart|stalwart|||stalwart_stalwart-data|4G' load_targets "$TMP/stalwart.yml"
+# The container is the one the job STOPS. Without it the job would snapshot a live store.
+printf 'targets:\n  - {name: m, kind: stalwart, volume: v, floor: 1}\n' > "$TMP/st-noc.yml"
+ok   'stalwart without a container is refused' 1 load_targets "$TMP/st-noc.yml"
+printf 'targets:\n  - {name: m, kind: stalwart, container: stalwart, floor: 1}\n' > "$TMP/st-nov.yml"
+ok   'stalwart without a volume is refused' 1 load_targets "$TMP/st-nov.yml"
 printf 'targets:\n  - {name: a, kind: volume, volume: v}\n' > "$TMP/floor.yml"
 ok   'a target without a floor is refused' 1 load_targets "$TMP/floor.yml"
 printf 'targets:\n  - {name: "a b", kind: volume, volume: v, floor: 1}\n' > "$TMP/name.yml"
@@ -199,6 +207,34 @@ says 'mismatch names the table'           'clients' compare_counts "$LIVE" $'ten
 ok   'a table missing from restore fails' 1 compare_counts "$LIVE" $'tenants 3\nclients 120'
 ok   'nothing to compare fails'           1 compare_counts '' ''
 ok   'zero rows everywhere still passes'  0 compare_counts $'tenants 0' $'tenants 0'
+# The mail drill compares "<account> <messages> <bytes>": every field after the key counts.
+MAIL=$'admin@kaiteki.my 144757 660110357\nhr@kaiteki.my 12 34567'
+ok   'identical mail inventories pass'    0 compare_counts "$MAIL" "$MAIL"
+ok   'same messages, different bytes fails' 1 compare_counts "$MAIL" $'admin@kaiteki.my 144757 660110356\nhr@kaiteki.my 12 34567'
+says 'the mismatch shows both values'     'live=144757 660110357 restored=144757 660110356' compare_counts "$MAIL" $'admin@kaiteki.my 144757 660110356\nhr@kaiteki.my 12 34567'
+ok   'an account missing from restore fails' 1 compare_counts "$MAIL" $'admin@kaiteki.my 144757 660110357'
+# Extra accounts in the restore are a mismatch too: the store the drill opened is not live's.
+ok   'an account only in the restore fails' 1 compare_counts "$MAIL" "$MAIL"$'\nghost@kaiteki.my 0 0'
+says 'the extra account is named'         'ghost@kaiteki.my' compare_counts "$MAIL" "$MAIL"$'\nghost@kaiteki.my 0 0'
+
+# ── JMAP: what the mail inventory reads out of a Stalwart response ──────────────────
+PRINCIPALS='{"methodResponses":[["Principal/get",{"accountId":"p3","list":[{"id":"b","name":"admin@kaiteki.my","email":"admin@kaiteki.my"},{"id":"t","name":"admin@blueprintdigital.my"}]},"0"]]}'
+says 'principals: id and name per line'   $'b admin@kaiteki.my\nt admin@blueprintdigital.my' jmap_principals "$PRINCIPALS"
+ok   'no principals is refused -- an empty inventory proves nothing' 1 jmap_principals '{"methodResponses":[["Principal/get",{"list":[]},"0"]]}'
+ok   'a JMAP error is refused'            1 jmap_principals '{"methodResponses":[["error",{"type":"forbidden"},"0"]]}'
+says 'the error type is named'            'forbidden' jmap_principals '{"methodResponses":[["error",{"type":"forbidden"},"0"]]}'
+ok   'something that is not JMAP is refused' 1 jmap_principals 'Unauthorized'
+
+PAGE='{"methodResponses":[["Email/query",{"ids":["a","b","c"],"total":573,"position":0},"0"],["Email/get",{"list":[{"size":5104,"id":"a"},{"size":7344,"id":"b"},{"size":5049,"id":"c"}]},"1"]]}'
+says 'page: total, messages on the page, their bytes' '573 3 17497' jmap_page "$PAGE"
+says 'an empty mailbox is 0 0 0'          '0 0 0' jmap_page '{"methodResponses":[["Email/query",{"ids":[],"total":0},"0"],["Email/get",{"list":[]},"1"]]}'
+ok   'an error in either call is refused' 1 jmap_page '{"methodResponses":[["Email/query",{"ids":[],"total":0},"0"],["error",{"type":"forbidden"},"1"]]}'
+ok   'a truncated response is refused'    1 jmap_page '{"methodResponses":[["Email/query",{"ids":[],"total":0},"0"]]}'
+
+# ── restic --json: the id of the snapshot a backup just wrote ────────────────────────
+RJSON=$'{"message_type":"status","percent_done":1}\n{"message_type":"summary","files_new":3,"snapshot_id":"4f2a9c1b8d7e6f5a4f2a9c1b8d7e6f5a4f2a9c1b8d7e6f5a4f2a9c1b8d7e6f5a"}'
+says 'the summary line carries the id'    '4f2a9c1b8d7e6f5a4f2a9c1b8d7e6f5a4f2a9c1b8d7e6f5a4f2a9c1b8d7e6f5a' restic_snapshot_id "$RJSON"
+ok   'no summary line is refused'         1 restic_snapshot_id '{"message_type":"status","percent_done":0.5}'
 
 printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
 [[ "$FAILED" == 0 ]]

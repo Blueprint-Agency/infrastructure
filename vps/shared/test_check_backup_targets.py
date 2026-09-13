@@ -352,6 +352,53 @@ expect("drill_tables on a volume target fails", repo(H1, {
          "drill_tables": ["x"]}]}),
 }), 1, "drill_tables")
 
+# stalwart: the mail store. The job stops the named container, so both must be real -- a
+# container no compose defines is a store the job would read while it is still running.
+MAIL_COMPOSE = """
+    services:
+      stalwart:
+        image: stalwartlabs/stalwart:v0.16.21
+        container_name: stalwart
+        volumes: [stalwart-data:/opt/stalwart]
+    volumes:
+      stalwart-data:
+"""
+expect("a stalwart target covers its volume", repo(H1, {
+    "vps/h1/stacks/stalwart/docker-compose.yml": MAIL_COMPOSE,
+    "vps/h1/stacks/backup/targets.yml": """
+        targets:
+          - {name: mail-store, kind: stalwart, container: stalwart, volume: stalwart_stalwart-data, floor: 4G}
+    """,
+}), 0)
+
+expect("a stalwart target without a container fails", repo(H1, {
+    "vps/h1/stacks/stalwart/docker-compose.yml": MAIL_COMPOSE,
+    "vps/h1/stacks/backup/targets.yml": """
+        targets:
+          - {name: mail-store, kind: stalwart, volume: stalwart_stalwart-data, floor: 4G}
+    """,
+}), 1, "stalwart needs a container")
+
+expect("a stalwart target naming a container no compose defines fails", repo(H1, {
+    "vps/h1/stacks/stalwart/docker-compose.yml": MAIL_COMPOSE,
+    "vps/h1/stacks/backup/targets.yml": """
+        targets:
+          - {name: mail-store, kind: stalwart, container: mailserver, volume: stalwart_stalwart-data, floor: 4G}
+    """,
+}), 1, "'mailserver' is in no compose file")
+
+# Stopping a container that does not mount the volume would pause mail and still read a
+# live store.
+expect("a stalwart target whose container does not mount the volume fails", repo(H1, {
+    "vps/h1/stacks/stalwart/docker-compose.yml": MAIL_COMPOSE,
+    "vps/h1/stacks/app/docker-compose.yml": DB_COMPOSE,
+    "vps/h1/stacks/backup/targets.yml": """
+        targets:
+          - {name: mail-store, kind: stalwart, container: app-db, volume: stalwart_stalwart-data, floor: 4G}
+          - {name: assets, kind: volume, volume: web-assets, floor: 1K}
+    """,
+}), 1, "does not mount")
+
 # And the real thing.
 r = check(REPO)
 assert r.returncode == 0, f"this repository's backup targets do not check out:\n{r.stdout}{r.stderr}"

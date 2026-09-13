@@ -22,6 +22,19 @@ targets:
     floor: 16M
     drill_tables: [kbsb_posts, kbsb_postmeta, kbsb_users, kbsb_terms, kbsb_term_relationships, kbsb_comments]
 
+  # All mail for all three domains: Stalwart's RocksDB store. kind stalwart: the job STOPS
+  # `container` for the snapshot, starts it again, and fails the target unless it answers.
+  # Why a stop and not an export, how long, and what a failure does to mail:
+  # docs/backup-restore.md, "The mail store".
+  # Floor, measured 2026-09-14: 7.3G live -- 6.1G of .blob files (message bodies), 1.1G of
+  # .sst. An empty store is a few MB. 4G sits well below the blobs alone and far above an
+  # empty or freshly re-initialised store.
+  - name: mail-store
+    kind: stalwart
+    container: stalwart
+    volume: stalwart_stalwart-data
+    floor: 4G
+
   # Bulwark webmail: encrypted per-user settings, one .enc file per user. 92K live
   # (2026-09-14). An empty volume is 4K; 32K is at least seven users' settings.
   - name: bulwark-settings
@@ -52,17 +65,16 @@ targets:
     floor: 32K
 
 skip:
-  - volume: stalwart_stalwart-data
-    reason: >-
-      NOT BACKED UP -- all mail for all three domains. An embedded store: reading it live is
-      not a backup. Its method is decided in #29.
   - volume: stalwart_bulwark-telemetry
     reason: >-
       Bulwark's anonymous telemetry: .telemetry-id, state.json (consent) and logins.json
       (login counters for that telemetry). Checked 2026-09-14 -- no settings, no mail, no
       credentials. Bulwark creates a fresh id when it is empty.
   - volume: backup_restic_cache
-    reason: restic's local index cache; rebuilt from the repository in R2 on the next run.
+    reason: >-
+      restic's local index cache; rebuilt from the repository in R2 on the next run. It also
+      holds stopped-by-backup/, the record of a container mail-store stopped -- live state
+      that only matters mid-run, and a restore of last night's copy would be wrong anyway.
   - volume: monitoring_textfile
     reason: >-
       Heartbeat metrics. backup.prom is rewritten by every successful run; losing it reads

@@ -17,9 +17,13 @@
 # See docs/backup-restore.md.
 set -eu
 . /app/bin/lib.sh
+. /app/bin/stalwart.sh
 
 : "${BACKUP_HOST:?}" "${BACKUP_TARGETS:?}" "${BACKUP_IMAGE:?}" "${TEXTFILE_DIR:?}"
 : "${RESTIC_REPOSITORY:?}" "${RESTIC_PASSWORD:?}" "${RESTIC_CACHE_VOLUME:?}"
+# The longest a `stalwart` target may keep its server stopped for the snapshot, in seconds.
+# Past it the snapshot is abandoned, the server started, and the target fails.
+PAUSE_LIMIT=${BACKUP_PAUSE_LIMIT:-600}
 
 log() { printf '%s [backup] %s\n' "$(date '+%F %T %Z')" "$*"; }
 
@@ -27,8 +31,18 @@ lines=$(load_targets "$BACKUP_TARGETS") || exit 2
 names=$(target_names "$lines")
 selected=$(select_targets "$names" "$@") || exit 2
 
-# The dumps are plaintext member data: never leave one behind, including on failure.
-trap 'rm -rf "$SCRATCH_ROOT"/*' EXIT
+# One run at a time. Two would share scratch paths -- and a second run ending would start a
+# mail server the first had stopped, mid-snapshot, making that snapshot a live read.
+exec 9> /run/backup.lock
+flock -n 9 || { log "another backup run is in progress; not starting a second"; exit 2; }
+
+# The dumps are plaintext member data: never leave one behind, including on failure. And
+# never leave a mail server stopped: whatever ends this run -- an error, `docker stop
+# backup`, Ctrl-C -- starts any container a stalwart target stopped.
+trap 'restart_stopped || true; rm -rf "$SCRATCH_ROOT"/*' EXIT
+# Covers Ctrl-C on a `docker exec` run. `docker stop backup` signals crond (PID 1), not this
+# script, and takes it down with the container: for that, entrypoint.sh is the safety net.
+trap 'exit 1' INT TERM HUP
 
 # Exit 10 is restic's "repository does not exist". Anything else -- a bad key, no
 # network -- must fail the run, not attempt an init against a repository we cannot see.
@@ -80,13 +94,75 @@ volume_bytes() { # <volume>
 # volume snapshot: restic runs in a sibling container that mounts the volume READ-ONLY,
 # so the volume is never mounted into this long-lived container and adding one needs no
 # compose change. -e NAME passes this container's value through without putting it in argv.
-snapshot_volume() { # <name> <volume>
+#
+# <limit> is seconds, or 0 for none. It is enforced INSIDE the sibling, on restic itself:
+# killing this side's `docker run` client would leave the container, and restic, running.
+# SIGINT, so restic removes its repository lock on the way out.
+snapshot_volume() { # <name> <volume> <limit> [restic backup args...]
+  _sv_name=$1 _sv_volume=$2 _sv_limit=$3
+  shift 3
+  # busybox `timeout 0` does not mean "no limit": it kills at once. No limit is no timeout.
+  if [ "$_sv_limit" -gt 0 ]; then
+    # -k 60: a restic that ignores the SIGINT is KILLed a minute later, so the limit holds.
+    set -- timeout -s INT -k 60 "$_sv_limit" restic backup "$@"
+  else
+    set -- restic backup "$@"
+  fi
+  _sv_entry=$1
+  shift
   docker run --rm \
-    -v "$2:/volumes/$2:ro" -v "$RESTIC_CACHE_VOLUME:/cache" \
+    -v "$_sv_volume:/volumes/$_sv_volume:ro" -v "$RESTIC_CACHE_VOLUME:/cache" \
     -e RESTIC_REPOSITORY -e RESTIC_PASSWORD -e RESTIC_CACHE_DIR \
     -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
-    --entrypoint restic "$BACKUP_IMAGE" \
-    backup --host "$BACKUP_HOST" --tag "$1" "/volumes/$2"
+    --entrypoint "$_sv_entry" "$BACKUP_IMAGE" \
+    "$@" --host "$BACKUP_HOST" --tag "$_sv_name" "/volumes/$_sv_volume"
+}
+
+# forget_warm <name>: drop the warm-pass snapshots of a stalwart target -- tonight's, and
+# any a failed run left behind. Their data stays wherever tonight's real snapshot uses it;
+# the rest goes at this target's --prune.
+forget_warm() {
+  # Two steps, not a pipe: ash has no pipefail here, and a failed listing piped into yq
+  # reads as "no warm snapshots" -- which would leave them to pile up, never pruned.
+  json=$(restic snapshots --host "$BACKUP_HOST" --tag "$1-warm" --json) || return 1
+  ids=$(printf '%s' "$json" | yq -p json -r '.[].id') || return 1
+  # shellcheck disable=SC2086 # one argument per id
+  [ -z "$ids" ] || restic forget $ids >/dev/null
+}
+
+# stalwart: Stalwart keeps mail in RocksDB, and a live read of that is not a backup. v0.16.21
+# has no online export (docs/backup-restore.md, "The mail store"), so the server is stopped
+# for the snapshot. Two passes keep that stop short:
+#
+#   1. warm: the volume, read while Stalwart runs. NOT a backup -- an inconsistent read,
+#      tagged <name>-warm and forgotten below -- but it puts nearly every byte in the
+#      repository, so the pause does not depend on how much is new or how fast R2 is.
+#   2. real: Stalwart stopped, the volume read again with the warm pass as parent. restic
+#      skips every file whose size and mtime are unchanged, and RocksDB's .sst and .blob
+#      files never change once written -- so this reads the few files written since.
+#
+# Then Stalwart starts, and the target fails unless it answers again.
+snapshot_stalwart() { # <name> <container> <volume>
+  forget_warm "$1" || return 1
+  log "$1: warm pass of $3 while $2 runs (inconsistent; tagged $1-warm, forgotten after)"
+  # restic exit 3 is "snapshot written, some files could not be read": RocksDB compaction
+  # deletes .sst files while the server runs, so on this pass that is expected, not a fault.
+  warm=$(snapshot_volume "$1-warm" "$3" 0 --json) || [ $? -eq 3 ] || return 1
+  warm_id=$(restic_snapshot_id "$warm") || return 1
+
+  log "$1: stopping $2 -- mail is paused until it starts (limit ${PAUSE_LIMIT}s)"
+  stopped_at=$(date +%s) || return 1
+  stop_for_backup "$2" || { restart_stopped; return 1; }
+  rc=0
+  snapshot_volume "$1" "$3" "$PAUSE_LIMIT" --parent "$warm_id" || rc=1
+  restart_stopped || rc=1
+  log "$1: $2 was stopped for $(($(date +%s) - stopped_at))s"
+  [ "$rc" -eq 0 ] || { log "$1: the snapshot failed or overran ${PAUSE_LIMIT}s"; return 1; }
+
+  stalwart_ready "$2" || { log "$1: snapshot taken, but $2 is not answering"; return 1; }
+  # Not a failure of tonight's backup: the snapshot is good. A leftover warm snapshot is
+  # forgotten at the start of the next run.
+  forget_warm "$1" || log "$1: could not forget the warm pass; the next run will"
 }
 
 # run_target <line>: everything for one target. Logs go to stderr; the only thing on
@@ -110,7 +186,13 @@ EOF
       bytes=$(volume_bytes "$volume") || return 1
       check_floor "$name" "$bytes" "$floor" || return 1
       log "$name: snapshot of volume $volume ($bytes bytes)" >&2
-      snapshot_volume "$name" "$volume" >&2 || return 1
+      snapshot_volume "$name" "$volume" 0 >&2 || return 1
+      ;;
+    stalwart)
+      bytes=$(volume_bytes "$volume") || return 1
+      check_floor "$name" "$bytes" "$floor" || return 1
+      log "$name: snapshot of mail store $volume ($bytes bytes)" >&2
+      snapshot_stalwart "$name" "$container" "$volume" >&2 || return 1
       ;;
   esac
 

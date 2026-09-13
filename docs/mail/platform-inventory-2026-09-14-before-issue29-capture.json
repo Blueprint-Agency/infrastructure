@@ -1,0 +1,158 @@
+{
+  "captured": "2026-09-13T18:27:40Z",
+  "domain": "blueprintdigital.my",
+  "mail_host": "mail.blueprintdigital.my",
+  "source": "JMAP Principal/get + Email/query + Email/get(size)",
+  "note": "bytes are the summed sizes of the messages themselves, not the size of the store on disk -- see the header of scripts/mail-inventory.py",
+  "accounts": [
+    {
+      "account": "accounts@kaiteki.my",
+      "description": null,
+      "messages": 573,
+      "bytes": 1123621740
+    },
+    {
+      "account": "admin.support@kaiteki.my",
+      "description": null,
+      "messages": 391,
+      "bytes": 702601997
+    },
+    {
+      "account": "admin@blueprintdigital.my",
+      "description": "Blueprint Administrator",
+      "messages": 19,
+      "bytes": 138319
+    },
+    {
+      "account": "admin@kaiteki.my",
+      "description": "Kaiteki Administrator",
+      "messages": 144765,
+      "bytes": 660162057
+    },
+    {
+      "account": "admin@reservetoday.app",
+      "description": "Reserve Today Admin",
+      "messages": 6,
+      "bytes": 43047
+    },
+    {
+      "account": "chriskke@blueprintdigital.my",
+      "description": null,
+      "messages": 0,
+      "bytes": 0
+    },
+    {
+      "account": "danielchua@blueprintdigital.my",
+      "description": null,
+      "messages": 2,
+      "bytes": 14490
+    },
+    {
+      "account": "drchew@kaiteki.my",
+      "description": null,
+      "messages": 368,
+      "bytes": 114775446
+    },
+    {
+      "account": "drjessie@kaiteki.my",
+      "description": null,
+      "messages": 1064,
+      "bytes": 153021610
+    },
+    {
+      "account": "dryeongbin@kaiteki.my",
+      "description": null,
+      "messages": 432,
+      "bytes": 39892309
+    },
+    {
+      "account": "hello@kaiteki.my",
+      "description": null,
+      "messages": 4823,
+      "bytes": 1771076442
+    },
+    {
+      "account": "hello@reservetoday.app",
+      "description": "Reserve Today",
+      "messages": 4,
+      "bytes": 16915
+    },
+    {
+      "account": "hr@kaiteki.my",
+      "description": "Kaiteki HR",
+      "messages": 953,
+      "bytes": 526396221
+    },
+    {
+      "account": "ka.finance@kaiteki.my",
+      "description": null,
+      "messages": 629,
+      "bytes": 346317251
+    },
+    {
+      "account": "kb.finance@kaiteki.my",
+      "description": null,
+      "messages": 1066,
+      "bytes": 555675745
+    },
+    {
+      "account": "kc.finance@kaiteki.my",
+      "description": null,
+      "messages": 276,
+      "bytes": 164175632
+    },
+    {
+      "account": "kk.finance@kaiteki.my",
+      "description": null,
+      "messages": 585,
+      "bytes": 516962468
+    },
+    {
+      "account": "knc.finance@kaiteki.my",
+      "description": null,
+      "messages": 987,
+      "bytes": 730993647
+    },
+    {
+      "account": "kp.finance@kaiteki.my",
+      "description": null,
+      "messages": 769,
+      "bytes": 393402079
+    },
+    {
+      "account": "ks.finance@kaiteki.my",
+      "description": null,
+      "messages": 680,
+      "bytes": 282212635
+    },
+    {
+      "account": "lj.finance@kaiteki.my",
+      "description": null,
+      "messages": 455,
+      "bytes": 353585699
+    },
+    {
+      "account": "portal@reservetoday.app",
+      "description": null,
+      "messages": 0,
+      "bytes": 0
+    },
+    {
+      "account": "webmaster@kaiteki.my",
+      "description": null,
+      "messages": 99,
+      "bytes": 2838903
+    },
+    {
+      "account": "yuchen@blueprintdigital.my",
+      "description": null,
+      "messages": 0,
+      "bytes": 0
+    }
+  ],
+  "totals": {
+    "accounts": 24,
+    "messages": 158946,
+    "bytes": 8437924652
+  }
+}

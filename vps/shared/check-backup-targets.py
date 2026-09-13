@@ -46,7 +46,9 @@ import yaml
 
 KINDS = {"postgres": ("container", "database", "role"),
          "mysql": ("container", "database", "role"),
-         "volume": ("volume",)}
+         "volume": ("volume",),
+         # The mail store: `container` is the server the job STOPS around the snapshot.
+         "stalwart": ("container", "volume")}
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 SIZE = re.compile(r"^[0-9]+[KMG]?$")
 VAR = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
@@ -138,7 +140,7 @@ def check_host(host, problems):
         seen.add(name)
         kind = t.get("kind")
         if kind not in KINDS:
-            problems.append(f"{where}: {name}: unknown kind {kind!r} (postgres, mysql or volume)")
+            problems.append(f"{where}: {name}: unknown kind {kind!r} (postgres, mysql, volume or stalwart)")
         else:
             for field in KINDS[kind]:
                 if not str(t.get(field) or "").strip():
@@ -163,6 +165,17 @@ def check_host(host, problems):
             backed_up[t["volume"]] = t.get("name")
             if t["volume"] not in volumes:
                 problems.append(f"{where}: {t.get('name')}: volume {t['volume']!r} is in no compose file")
+        elif t.get("kind") == "stalwart" and t.get("volume") and t.get("container"):
+            # Snapshotted only while `container` is stopped -- so that container must be the
+            # one holding the store open, or the snapshot reads a live store after all.
+            backed_up[t["volume"]] = t.get("name")
+            if t["volume"] not in volumes:
+                problems.append(f"{where}: {t.get('name')}: volume {t['volume']!r} is in no compose file")
+            if t["container"] not in mounts:
+                problems.append(f"{where}: {t.get('name')}: container {t['container']!r} is in no compose file")
+            elif t["volume"] not in mounts[t["container"]]:
+                problems.append(f"{where}: {t.get('name')}: container {t['container']!r} does not mount "
+                                f"{t['volume']!r} -- stopping it would not make the store consistent")
         elif t.get("kind") in ("postgres", "mysql") and t.get("container"):
             if t["container"] not in mounts:
                 problems.append(f"{where}: {t.get('name')}: container {t['container']!r} is in no compose file")
