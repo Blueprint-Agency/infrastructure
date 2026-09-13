@@ -86,9 +86,10 @@ jobs:
       - name: Self-check the backup job helpers
         run: bash scripts/test_backup_lib.sh
 
-      # Every host in vps/hosts.json has a backup targets.yml, and every named volume in its
-      # compose files is backed up or skipped with a reason. This is what stops backup
-      # coverage from rotting as stacks change. PyYAML is python3-yaml on the runner.
+      # Every in-scope host in vps/hosts.json has a backup targets.yml, and every named volume
+      # in its compose files is backed up or skipped with a reason. A host declared
+      # no_backups: <reason> is exempt and must carry no targets file. This is what stops
+      # backup coverage from rotting as stacks change. PyYAML is python3-yaml on the runner.
       - name: Check backup targets cover every volume
         run: |
           python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
@@ -97,19 +98,12 @@ jobs:
       # Monitoring agrees with itself: every allowlisted metric backs a panel or rule under
       # grafana/, every metric a panel or rule reads is allowlisted, and each monitored host's
       # container-down rule names exactly the containers its compose files define. Then the
-      # grafana-apply translation, and every config.alloy validated by the Alloy tag its own
-      # Dockerfile pins -- a typo'd argument otherwise surfaces as a crash-looping agent.
+      # grafana-apply translation, and every Alloy config validated against its pinned tag.
       - name: Check monitoring allowlist, dashboards, rules and agent config
         run: |
           python3 vps/shared/test_check_monitoring.py
           python3 scripts/test_grafana_apply.py
-          for cfg in vps/*/stacks/monitoring/config.alloy; do
-            [ -f "$cfg" ] || continue
-            dir=$(dirname "$cfg")
-            image=$(sed -n 's/^FROM //p' "$dir/Dockerfile")
-            echo "--- $cfg against $image"
-            docker run --rm -v "$PWD/$dir:/etc/alloy:ro" "$image" validate /etc/alloy/config.alloy
-          done
+          bash vps/shared/validate-alloy.sh
 
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4

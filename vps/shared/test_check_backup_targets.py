@@ -256,6 +256,28 @@ expect("an unresolvable variable in a volume name fails rather than guessing", r
     """,
 }), 1, "SOMETHING")
 
+# A host declared out of scope. The point of these three is that an exemption is a claim
+# someone made on purpose and has to keep true -- not a quiet hole where a host used to be.
+OUT = [{"key": "h1", "dir": "vps/h1", "env_name": "prod",
+        "no_backups": "Teeko host, out of scope (#4). Leaves n8n's database unprotected."}]
+
+expect("an out-of-scope host needs no targets file, and its volumes are not checked", repo(OUT, {
+    "vps/h1/stacks/app/docker-compose.yml": DB_COMPOSE,
+}), 0, "out of scope for backups", "Leaves n8n's database unprotected")
+
+expect("an out-of-scope host that still has a targets file fails", repo(OUT, {
+    "vps/h1/stacks/app/docker-compose.yml": DB_COMPOSE,
+    "vps/h1/stacks/backup/targets.yml": """
+        targets:
+          - {name: db, kind: postgres, container: app-db, database: d, role: postgres, floor: 1K}
+    """,
+}), 1, "still exists")
+
+expect("an exemption with a blank reason fails", repo(
+    [{"key": "h1", "dir": "vps/h1", "env_name": "prod", "no_backups": "   "}], {
+        "vps/h1/stacks/app/docker-compose.yml": DB_COMPOSE,
+    }), 1, "needs a reason")
+
 # And the real thing.
 r = check(REPO)
 assert r.returncode == 0, f"this repository's backup targets do not check out:\n{r.stdout}{r.stderr}"

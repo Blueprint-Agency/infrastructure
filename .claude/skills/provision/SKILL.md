@@ -72,9 +72,13 @@ is `bp-<key>`.
    ```
    `env_name` is the host default written as `ENV_NAME` into every stack's `.env`.
    Add `fanout` only when one repo stack deploys into several dirs on this host —
-   each destination then carries its own `env_name`. Also add
-   `vps/<key>/stacks/backup/targets.yml` (skips with reasons are fine until the host
-   runs the backup job — list `backup` in `exclude` meanwhile); CI fails without it.
+   each destination then carries its own `env_name`. Also decide the host's backup
+   scope, or CI fails: either add `vps/<key>/stacks/backup/targets.yml` (skips with
+   reasons are fine until the host runs the backup job — list `backup` in `exclude`
+   meanwhile), **or** declare the host out of scope with `no_backups: <reason>` and add
+   **no** targets file. The reason is mandatory and must name what it leaves unprotected;
+   it is printed on every check run. Out of scope is a decision someone signs, not a
+   default — prefer a targets file.
 
 9. **Update `CLAUDE.md`** — the VPS Access table, What's Running, and the firewall
    section. Agents read that file, not this one, to know what exists.

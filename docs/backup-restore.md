@@ -2,12 +2,18 @@
 
 Nightly, encrypted, off-site snapshots, and the one command that proves they restore.
 
+**Scope: bpvps1 and bpvps2 only.** The three Teeko hosts — vps1-staging, vps2-prod and
+vps3-prod — are out of scope by decision (#4), declared as `no_backups: <reason>` in
+`vps/hosts.json`. **They are not backed up at all**, and each reason names what that leaves
+unprotected: ehailing production Postgres, both n8n databases and their encryption keys, the
+WABA database, and both teeko-website databases. `check-backup-targets.py` prints that list on
+every run, so a clean check never reads as "everything is backed up".
+
 **Coverage today: `booking-staging` on bpvps2 only** (#26) — the instance that holds every
-studio's real member and booking data. What each host backs up is declared in
-`vps/<host>/stacks/backup/targets.yml` (#27); on the other four hosts that file is, for now,
-nothing but skips, each saying which ticket closes it — the other four hosts (#28), mail (#29),
-and restore-to-live, the monthly drill and hypervisor snapshots (#30). Until those land,
-nothing else on any host is backed up.
+studio's real member and booking data. What each in-scope host backs up is declared in
+`vps/<host>/stacks/backup/targets.yml` (#27). Still to land: bpvps1 (#28), the mail store
+(#29), and restore-to-live plus the monthly drill and hypervisor snapshots (#30). Until those
+land, nothing except `booking-staging` is backed up anywhere.
 
 ## Where snapshots are
 
@@ -66,9 +72,13 @@ skip:
 ```
 
 **CI checks it** (`vps/shared/check-backup-targets.py`, run by
-`test_check_backup_targets.py` on every deploy): every host in `vps/hosts.json` has the file,
-and every named volume in that host's compose files is backed up — by a `volume` target, or by
-a `postgres`/`mysql` target dumping the container that mounts it — or skipped **with a reason**.
+`test_check_backup_targets.py` on every deploy): every **in-scope** host in `vps/hosts.json`
+has the file, and every named volume in that host's compose files is backed up — by a `volume`
+target, or by a `postgres`/`mysql` target dumping the container that mounts it — or skipped
+**with a reason**. A host carrying `no_backups: <reason>` is exempt instead, and must have
+**no** targets file: a leftover one means the scope decision and the repo disagree, and the
+check fails. A blank reason fails too — an exemption nobody justified is indistinguishable
+from one nobody noticed.
 It also fails on a declaration that no compose file matches any more. A new stack with a volume
 therefore cannot ship until someone decides about that volume.
 

@@ -39,7 +39,7 @@ skip:
   - volume: infra_traefik-letsencrypt
     reason: >-
       Traefik's issued certificates, which it re-issues on its own if lost. Captured on
-      all five hosts in #28.
+      both in-scope hosts in #28.
   - volume: backup_restic_cache
     reason: restic's local index cache; rebuilt from the repository in R2 on the next run.
   - volume: monitoring_alloy_data

@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Check that every host declares its backup set, and that the declaration matches reality.
 
-For every host in vps/hosts.json:
+For every host in vps/hosts.json that is in scope for backups:
+
+  0. A host may be declared OUT of scope with `no_backups: <reason>` in vps/hosts.json. It
+     then must NOT carry a targets.yml -- a file there means the scope decision and the repo
+     disagree, and one of them is wrong. Exempt hosts are named in every run's output, clean
+     or not, so that "all clear" can never be read as "everything is backed up". The three
+     Teeko hosts are exempt (#4, #22); what that leaves unprotected is in each reason.
 
   1. <dir>/stacks/backup/targets.yml exists and is well formed -- the same rules the job
      enforces at runtime (bin/lib.sh load_targets), caught before a deploy instead of at
@@ -87,6 +93,16 @@ def compose_inventory(host, problems):
 def check_host(host, problems):
     key = host["key"]
     path = pathlib.Path(host["dir"]) / "stacks" / "backup" / "targets.yml"
+    if host.get("no_backups"):
+        # Out of scope by decision. Demand a reason -- an exemption nobody justified is
+        # indistinguishable from one nobody noticed -- and refuse a leftover targets file,
+        # which would mean the repo still declares a backup set for a host we do not back up.
+        if not str(host["no_backups"]).strip():
+            problems.append(f"{key}: no_backups needs a reason -- say what it leaves unprotected")
+        if path.is_file():
+            problems.append(f"{key}: declared no_backups but {path.as_posix()} still exists -- "
+                            "delete it, or drop no_backups")
+        return
     if not path.is_file():
         problems.append(f"{key}: no {path.as_posix()} -- every host declares what it backs up, "
                         "even if that is only skips")
@@ -153,14 +169,25 @@ def check_host(host, problems):
 def main():
     os.chdir(pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve())
     problems = []
-    for host in json.loads(pathlib.Path("vps/hosts.json").read_text(encoding="utf-8")):
+    hosts = json.loads(pathlib.Path("vps/hosts.json").read_text(encoding="utf-8"))
+    for host in hosts:
         check_host(host, problems)
     for p in problems:
         print(p)
+
+    # Print the exemptions whatever the verdict. A run that says only "all clear" while three
+    # hosts sit silently out of scope is the exact failure this check exists to prevent.
+    exempt = [h for h in hosts if h.get("no_backups")]
+    if exempt:
+        print(f"out of scope for backups ({len(exempt)} host(s)) -- NOT backed up:")
+        for h in exempt:
+            print(f"  {h['key']}: {h['no_backups']}")
+
     if problems:
         print(f"{len(problems)} backup-target problem(s)")
         return 1
-    print("backup targets: every host declared, every volume accounted for")
+    in_scope = len(hosts) - len(exempt)
+    print(f"backup targets: {in_scope} host(s) in scope, each declared, every volume accounted for")
     return 0
 
 

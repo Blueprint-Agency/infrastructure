@@ -117,11 +117,20 @@ host whose on-host dirs differ from the repo: a single `booking` stack fans out 
 > container on a monitored host means a line in `grafana/rules/containers.yml`**, or CI fails
 > (`vps/shared/check-monitoring.py`). Runbook: `docs/monitoring.md`.
 
-> **What a host backs up is `vps/<host>/stacks/backup/targets.yml`** (#27) — every host has
-> one, and CI fails if a named volume in that host's compose files is neither in it nor
+> **What a host backs up is `vps/<host>/stacks/backup/targets.yml`** (#27) — every **in-scope**
+> host has one, and CI fails if a named volume in that host's compose files is neither in it nor
 > skipped with a reason. **A new stack with a volume means an edit to that file**, or the
-> deploy fails. Hosts without the backup compose yet carry only skips and list `backup` in
+> deploy fails. A host without the backup compose yet carries only skips and lists `backup` in
 > `exclude`.
+
+> ⚠️ **Backups and monitoring cover bpvps1 and bpvps2 only.** vps1-staging, vps2-prod and
+> vps3-prod are out of scope by decision (#4, #22) and carry `no_backups: <reason>` in
+> `vps/hosts.json` instead of a targets file. **Nothing on those three is backed up or
+> monitored** — not ehailing's production Postgres, not either n8n (database *and* encryption
+> key), not the WABA database, not either teeko-website database. The reason string on each host
+> names its own casualties, `check-backup-targets.py` prints them on every run, and a leftover
+> targets file on an exempt host fails the check. Do not read "backup targets: all clear" as
+> "everything is backed up".
 
 Five things the compose files will not tell you — all of them "do not prune":
 
