@@ -77,7 +77,7 @@ compose` is still SSH.
 | `bp-vps2-prod` | Production | 4 vCPU / 16GB / 200GB |
 | `bp-vps3-prod` | Production | 4 vCPU / 16GB / 200GB |
 | `bp-bpvps1` | Kaiteki (legacy + revamp) + **the mail platform** (all three domains) | 187.127.122.41 |
-| `bp-bpvps2` | Booking-system only — no mail since 2026-09-12 (#12) | 187.127.207.82 |
+| `bp-bpvps2` | Booking-system + its `backup` stack — no mail since 2026-09-12 (#12) | 187.127.207.82 |
 
 SSH key: `~/.ssh/infra_ed25519`. All hosts log in as **`deploy`**, not root — `deploy` is in the `docker` group and owns `/root/stacks`. Hosts defined in `~/.ssh/config`.
 
@@ -102,6 +102,13 @@ host whose on-host dirs differ from the repo: a single `booking` stack fans out 
 > (booking moved off VPS3 and now has its own section) and for both Blueprint hosts on
 > 2026-09-12 (mail consolidated onto bpvps1). Everything else in it is still that July
 > snapshot — treat the Teeko hosts as history, not as inventory.
+
+> **Backups: only `booking-staging` on bpvps2 is backed up** (#26, since 2026-09-13). The
+> `backup` stack there dumps it nightly at 03:30 KL into the private R2 bucket
+> `blueprint-backups` (Blueprint account), restic-encrypted with `RESTIC_PASSWORD`. Nothing else
+> on any host has a backup yet — #27–#30. Before any production migration or import, run
+> `docker exec backup /app/bin/backup.sh`. Runbook: `docs/backup-restore.md`. `scripts/backup.sh`
+> is a same-host volume tar, **not** a backup of a running Postgres.
 
 Five things the compose files will not tell you — all of them "do not prune":
 

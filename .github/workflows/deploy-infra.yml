@@ -80,6 +80,11 @@ jobs:
       - name: Self-check the mail certificate name list
         run: bash scripts/test_renew_cert.sh
 
+      # The pure half of bpvps2's backup job: staging/prod tag separation, the RLS dump-role
+      # guard, and the restore drill's row-count comparison.
+      - name: Self-check the backup job helpers
+        run: bash scripts/test_backup_lib.sh
+
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -155,6 +160,11 @@ jobs:
           WABA_DB_USER: ${{ vars.WABA_DB_USER }}
           WABA_DB_PASSWORD: ${{ secrets.WABA_DB_PASSWORD }}
           WABA_DB_NAME: ${{ vars.WABA_DB_NAME }}
+          R2_BACKUP_ACCOUNT_ID: ${{ secrets.R2_BACKUP_ACCOUNT_ID }}
+          R2_BACKUP_BUCKET: ${{ vars.R2_BACKUP_BUCKET }}
+          R2_BACKUP_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_ACCESS_KEY_ID }}
+          R2_BACKUP_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_SECRET_ACCESS_KEY }}
+          RESTIC_PASSWORD: ${{ secrets.RESTIC_PASSWORD }}
         run: |
           RSH="ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=no"
 

@@ -1,0 +1,5 @@
+# Times are Asia/Kuala_Lumpur: crond reads TZ from the container environment.
+# Output goes to PID 1's stdout, so it shows in `docker logs backup`.
+# busybox crond: a `#` ANYWHERE on a line starts a comment (so no ${#var}), and it
+# silently skips a crontab not owned by root -- COPY it in, never bind-mount it.
+30 3 * * * . /run/job.env && /app/bin/backup.sh >/proc/1/fd/1 2>&1
