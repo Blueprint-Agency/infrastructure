@@ -1,6 +1,7 @@
 # Issue tracker: GitHub (REST, not `gh`)
 
-Issues and specs live as GitHub issues on **`Blueprint-Agency/teeko-infrastructure`**.
+Issues and specs live as GitHub issues on **`Blueprint-Agency/infrastructure`** (renamed from
+`teeko-infrastructure`; the old API path answers `301` with no body, which reads as an empty issue).
 There is **no `gh` CLI installed** — use `curl` + the REST API, per the repo's credentials
 rule. The PAT is `GITHUB_PERSONAL_ACCESS_TOKEN` in `.env`.
 
@@ -9,7 +10,7 @@ rule. The PAT is `GITHUB_PERSONAL_ACCESS_TOKEN` in `.env`.
 
 ```bash
 TOKEN=$(grep -m1 '^GITHUB_PERSONAL_ACCESS_TOKEN=' .env | cut -d= -f2-)
-API="https://api.github.com/repos/Blueprint-Agency/teeko-infrastructure"
+API="https://api.github.com/repos/Blueprint-Agency/infrastructure"
 gh_api() { curl -sS -H "Authorization: Bearer $TOKEN" \
                     -H "Accept: application/vnd.github+json" "$@"; }
 ```

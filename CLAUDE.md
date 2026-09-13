@@ -236,7 +236,7 @@ org variable exists for a **different repo's** deploy workflow. The org holds ex
 
 ## Agent skills
 
-`docs/agents/issue-tracker.md` — GitHub Issues on `Blueprint-Agency/teeko-infrastructure`, via
+`docs/agents/issue-tracker.md` — GitHub Issues on `Blueprint-Agency/infrastructure`, via
 `curl` + REST. `docs/agents/triage-labels.md` — the five canonical roles.
 `docs/agents/domain.md` — single-context `CONTEXT.md` + `docs/adr/` at the root, created lazily.
 

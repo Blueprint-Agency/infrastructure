@@ -59,7 +59,7 @@ is `bp-<key>`.
    address, user `deploy`, key `~/.ssh/infra_ed25519`. Never a public IP.
    Verify: `ssh bp-<key> 'echo OK $(hostname)'`.
 
-7. **GitHub Environment** named exactly `<key>`, on `Blueprint-Agency/teeko-infrastructure`.
+7. **GitHub Environment** named exactly `<key>`, on `Blueprint-Agency/infrastructure`.
    It needs **only** `TAILSCALE_HOST` (the `100.x` address) — `SSH_PRIVATE_KEY`,
    `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`, `CF_DNS_API_TOKEN`, `DOCKERHUB_TOKEN`,
    `ACME_EMAIL`, `BASE_DOMAIN` are org-level and inherited. Override `BASE_DOMAIN` /
