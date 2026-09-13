@@ -65,6 +65,8 @@ MONITORING = """
       alloy:
         build: .
         container_name: alloy
+        environment:
+          MONITORING_HOST: h1
 """
 ALLOWLIST = "node_cpu_seconds_total\ncontainer_last_seen\n"
 
@@ -151,6 +153,17 @@ wrong_host = down("h1", ["app-web-staging", "app-web-prod", "proxy"]).replace(
 assert wrong_host != down("h1", ["app-web-staging", "app-web-prod", "proxy"]), "fixture did not change"
 expect("selector without host matcher",
        base(**{"grafana/rules/containers.yml": wrong_host}), 1, 'host="h1"')
+
+# The agent stamps MONITORING_HOST as the `host` label; the rules match host="<key>". If the
+# two differ, every selector matches nothing and the down rule fires for every container.
+expect("host label differs from key",
+       base(**{"vps/h1/stacks/monitoring/docker-compose.yml": MONITORING.replace("MONITORING_HOST: h1",
+                                                                                 "MONITORING_HOST: srv123")}),
+       1, "MONITORING_HOST", "srv123")
+expect("host label missing",
+       base(**{"vps/h1/stacks/monitoring/docker-compose.yml": MONITORING.replace("MONITORING_HOST: h1",
+                                                                                 "TZ: UTC")}),
+       1, "MONITORING_HOST")
 
 expect("this repository", REPO, 0)
 

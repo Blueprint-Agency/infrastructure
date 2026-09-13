@@ -7,7 +7,7 @@
 //   logs     loki.process "select" below -- every container, minus Traefik access logs
 //
 // The labels every signal carries, and which panels and rules filter on:
-//   host             the host's hostname (the agent runs in the host network namespace)
+//   host             MONITORING_HOST from docker-compose.yml -- the vps/hosts.json key
 //   container        booking-be-staging, booking-db-prod, traefik, ...
 //   compose_project  the stack DIRECTORY on the host: booking-staging vs booking-prod
 //   compose_service  the service key: booking-be, db-booking, ...
@@ -87,7 +87,7 @@ prometheus.relabel "allowlist" {
 
   rule {
     target_label = "host"
-    replacement  = constants.hostname
+    replacement  = sys.env("MONITORING_HOST")
   }
 
   rule {
@@ -152,7 +152,7 @@ discovery.relabel "logs" {
 loki.source.docker "containers" {
   host       = "unix:///var/run/docker.sock"
   targets    = discovery.relabel.logs.output
-  labels     = {host = constants.hostname}
+  labels     = {host = sys.env("MONITORING_HOST")}
   forward_to = [loki.process.select.receiver]
 }
 

@@ -61,18 +61,22 @@ for env in ({}, {"N8N_DB_PASSWORD": ""}):
     assert r.returncode == 1, f"expected failure, got {r.returncode}"
     assert "N8N_DB_PASSWORD" in r.stderr and ".env.db-n8n" in r.stderr, r.stderr
 
-# The monitoring agent's real template (#23). An agent with a blank token starts happily and
-# ships nothing, so every one of its markers must fail the deploy when missing.
-real = SCRIPT.parents[2] / "vps" / "bpvps2" / "stacks" / "monitoring"
-markers = sorted(set(re.findall(r"@@([A-Z0-9_]+)@@", (real / "ci" / "env.ci").read_text())))
-assert "GRAFANA_CLOUD_API_TOKEN" in markers, markers
-full = {m: "x" for m in markers}
-r = subprocess.run([sys.executable, str(SCRIPT), str(real), tempfile.mkdtemp()],
-                   capture_output=True, text=True, env={**full, "PATH": ""})
-assert r.returncode == 0, r.stderr
-for m in markers:
-    r = subprocess.run([sys.executable, str(SCRIPT), str(real), tempfile.mkdtemp()],
-                       capture_output=True, text=True, env={**full, m: "", "PATH": ""})
-    assert r.returncode == 1 and m in r.stderr, f"blank {m} should fail the deploy: {r.stderr}"
+# Every REAL stack's templates: rendered with all markers set they succeed, and blanking any
+# single marker fails the deploy naming it. This is what makes "a blank secret fails the
+# deploy" true of the files that ship -- e.g. the monitoring agent, which with an empty token
+# would start happily and ship nothing.
+real_stacks = sorted({p.parents[1] for p in SCRIPT.parents[2].glob("vps/*/stacks/*/ci/*")})
+assert any(s.name == "monitoring" for s in real_stacks), real_stacks
+for stack in real_stacks:
+    markers = sorted({m for f in (stack / "ci").rglob("*") if f.is_file()
+                      for m in re.findall(r"@@([A-Z0-9_]+)@@", f.read_text(encoding="utf-8"))})
+    full = {m: "x" for m in markers}
+    r = subprocess.run([sys.executable, str(SCRIPT), str(stack), tempfile.mkdtemp()],
+                       capture_output=True, text=True, env={**full, "PATH": ""})
+    assert r.returncode == 0, f"{stack}: {r.stderr}"
+    for m in markers:
+        r = subprocess.run([sys.executable, str(SCRIPT), str(stack), tempfile.mkdtemp()],
+                           capture_output=True, text=True, env={**full, m: "", "PATH": ""})
+        assert r.returncode == 1 and m in r.stderr, f"{stack}: blank {m} should fail the deploy: {r.stderr}"
 
 print("render-ci.py: all checks passed")

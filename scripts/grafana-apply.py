@@ -29,6 +29,8 @@ import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 UNITS = {"s": 1, "m": 60, "h": 3600}
+# Every dashboard is saved into this folder -- the same one the alert rules name.
+DASHBOARD_FOLDER = "Monitoring"
 
 
 def load_json(path):
@@ -99,14 +101,11 @@ def main():
     groups = [g for p in sorted((ROOT / "grafana" / "rules").glob("*.y*ml"))
               for g in load_yaml(p).get("groups") or []]
     dashboards = [load_json(p) for p in sorted((ROOT / "grafana" / "dashboards").glob("*.json"))]
-    # Dashboards live beside the rules, in the one folder the rules name first.
-    home = groups[0]["folder"] if groups else "Monitoring"
-
     if dry:
         for g in groups:
             print(json.dumps(rule_group(g), indent=2))
         for d in dashboards:
-            print(f"dashboard {d['uid']}: {len(d.get('panels') or [])} panels -> {folder_uid(home)}")
+            print(f"dashboard {d['uid']}: {len(d.get('panels') or [])} panels -> {folder_uid(DASHBOARD_FOLDER)}")
         return 0
 
     missing = [v for v in ("GRAFANA_URL", "GRAFANA_SA_TOKEN") if not os.environ.get(v)]
@@ -114,7 +113,8 @@ def main():
         sys.exit(f"{', '.join(missing)} not set -- `set -a; . ./.env; set +a` first")
     api = Grafana(os.environ["GRAFANA_URL"], os.environ["GRAFANA_SA_TOKEN"])
 
-    titles = {folder_uid(g["folder"]): g["folder"] for g in groups} or {folder_uid(home): home}
+    titles = {folder_uid(g["folder"]): g["folder"] for g in groups}
+    titles[folder_uid(DASHBOARD_FOLDER)] = DASHBOARD_FOLDER
     for uid, title in titles.items():
         api.ensure_folder(uid, title)
     for g in groups:
@@ -122,7 +122,7 @@ def main():
         api.call("PUT", f"/api/v1/provisioning/folder/{folder}/rule-groups/{name}", body)
         print(f"rule group {folder}/{name}: {len(body['rules'])} rule(s) applied")
     for d in dashboards:
-        api.call("POST", "/api/dashboards/db", dashboard(d, folder_uid(home)))
+        api.call("POST", "/api/dashboards/db", dashboard(d, folder_uid(DASHBOARD_FOLDER)))
         print(f"dashboard {d['uid']}: applied")
     return 0
 

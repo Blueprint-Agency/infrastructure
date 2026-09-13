@@ -51,7 +51,7 @@ def queries(node):
             yield from queries(v)
 
 
-def load_grafana(problems):
+def load_grafana():
     """-> ({source file: [query]}, {rule uid: [query]})"""
     by_file, by_rule = {}, {}
     root = pathlib.Path("grafana")
@@ -99,6 +99,17 @@ def check_host(host, by_file, by_rule, problems):
     stack = pathlib.Path(host["dir"]) / "stacks" / "monitoring"
     if not stack.is_dir():
         return
+    # The `host` label on every metric and log line is MONITORING_HOST, and every rule matches
+    # host="<key>". Were they to differ, each absent_over_time would match nothing and the
+    # down rule would fire for every container, forever.
+    compose = [stack / f for f in COMPOSE_FILES if (stack / f).is_file()]
+    doc = yaml.safe_load(compose[0].read_text(encoding="utf-8")) or {} if compose else {}
+    labels = {str((svc or {}).get("environment", {}).get("MONITORING_HOST"))
+              for svc in (doc.get("services") or {}).values()
+              if isinstance((svc or {}).get("environment"), dict)}
+    if labels != {key}:
+        problems.append(f"{key}: {stack.as_posix()}: the agent must set MONITORING_HOST: {key} "
+                        f"(found {sorted(labels - {'None'}) or 'none'}) -- rules match host=\"{key}\"")
     path = stack / "metrics.allowlist"
     if not path.is_file():
         problems.append(f"{key}: no {path.as_posix()} -- the agent keeps only what it lists")
@@ -150,7 +161,7 @@ def check_host(host, by_file, by_rule, problems):
 def main():
     os.chdir(pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve())
     problems = []
-    by_file, by_rule = load_grafana(problems)
+    by_file, by_rule = load_grafana()
     for host in json.loads(pathlib.Path("vps/hosts.json").read_text(encoding="utf-8")):
         check_host(host, by_file, by_rule, problems)
     for p in problems:

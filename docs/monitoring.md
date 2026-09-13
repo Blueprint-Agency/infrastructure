@@ -52,7 +52,7 @@ Every metric and log line carries:
 
 | Label | Value |
 |---|---|
-| `host` | the host's hostname — `bpvps2` |
+| `host` | `MONITORING_HOST` in the stack's compose — the `vps/hosts.json` key, `bpvps2`. Not the kernel hostname; CI checks it matches the key the rules use |
 | `container` | `booking-be-staging`, `booking-db-prod`, `traefik`, … |
 | `compose_project` | the **stack directory** on the host — `booking-staging` vs `booking-prod` |
 | `compose_service` | the compose service key — `booking-be`, `db-booking`, … |
@@ -120,10 +120,12 @@ own addresses. **No address is committed here** — this repository is public.
 1. In the portal, create an **access policy** with scopes `metrics:write` and `logs:write`, and a
    token under it. From the stack's **Details** page take the Prometheus remote-write URL and
    user (instance ID) and the Loki push URL and user.
-2. Put them on `Blueprint-Agency/infrastructure` at **repository** level — they are the same for
-   every host: variables `GRAFANA_CLOUD_PROM_URL`, `GRAFANA_CLOUD_PROM_USER`,
-   `GRAFANA_CLOUD_LOKI_URL`, `GRAFANA_CLOUD_LOKI_USER`; secret `GRAFANA_CLOUD_API_TOKEN`.
-   An unset one fails the deploy by design.
+2. Put them in the host's **GitHub Environment** (`bpvps2`) on `Blueprint-Agency/infrastructure`,
+   per the `provision` skill — not org level, where every other repo in the org could read the
+   token. Variables `GRAFANA_CLOUD_PROM_URL`, `GRAFANA_CLOUD_PROM_USER`,
+   `GRAFANA_CLOUD_LOKI_URL`, `GRAFANA_CLOUD_LOKI_USER` (endpoints and instance IDs, not
+   secret); secret `GRAFANA_CLOUD_API_TOKEN`. bpvps1 (#25) gets the same five in its own
+   Environment. An unset one fails the deploy by design.
 3. Create a **service account** (Editor) and token for `grafana-apply.py`; put `GRAFANA_URL` and
    `GRAFANA_SA_TOKEN` in the local `.env`.
 4. Configure contact points and the default notification policy in the console.

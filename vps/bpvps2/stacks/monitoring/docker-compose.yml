@@ -19,8 +19,7 @@ services:
     restart: unless-stopped
     # The HOST's network namespace, for two reasons. /proc/net is per network namespace, so
     # in a bridge network node_network_* reports the container's own veth -- a flat line of a
-    # few KB (measured 2026-09-13). And constants.hostname becomes the host's real hostname,
-    # which is the `host` label on every metric and log line.
+    # few KB (measured 2026-09-13).
     network_mode: host
     command:
       - run
@@ -32,6 +31,10 @@ services:
       - /etc/alloy/config.alloy
     environment:
       TZ: Asia/Kuala_Lumpur
+      # The `host` label on every metric and log line. Literal, not the kernel hostname: the
+      # alert rules match host="bpvps2", and CI (check-monitoring.py) fails if this is not the
+      # host's key in vps/hosts.json -- a mismatch would fire the down rule for every container.
+      MONITORING_HOST: bpvps2
       # From ci/env.ci, rendered by CI; a blank one fails the deploy -- an agent with an
       # empty token starts happily and ships nothing.
       GRAFANA_CLOUD_PROM_URL: ${GRAFANA_CLOUD_PROM_URL}
@@ -44,6 +47,8 @@ services:
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
+      # Twice on purpose: node_exporter takes a sysfs path, cadvisor does not -- it reads the
+      # cgroup tree at /sys/fs/cgroup and nowhere else.
       - /sys:/sys:ro
       - /:/rootfs:ro,rslave
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -55,6 +60,8 @@ services:
       - /dev/disk:/dev/disk:ro
       # Log read positions and the metrics WAL: a restart resumes rather than re-ships.
       - alloy_data:/var/lib/alloy/data
+      # Not yet: the read-only monitoring_textfile mount and its textfile collector are #24's
+      # (docs/textfile-metrics.md). Until then backup.prom is written and nothing reads it.
     # Guard rails on a 1 vCPU / 4 GB host that serves the booking API. Measured use is in
     # docs/monitoring.md; these are ceilings, not the expected figure.
     cpus: 0.5
