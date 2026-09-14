@@ -36,6 +36,21 @@ targets:
     # stripe_payments is the payments table.
     drill_tables: [tenants, clients, bookings, client_packages, stripe_payments]
 
+  # The production instance. Seed data only today -- but booking-system's deploy snapshots
+  # the instance it is about to migrate (#30), and a production migration cannot be made
+  # reversible by a snapshot of a target that does not exist. Covers booking_prod_pgdata.
+  #
+  # Floor, measured 2026-09-14: live (seed data) 282,750 B; --schema-only 255,416 B. 256K
+  # (262,144 B) is the one gap there is: it catches a database left with its schema and
+  # nothing else, NOT a lost seed row. Raise it above the seed size once a studio is on prod.
+  - name: booking-prod
+    kind: postgres
+    container: booking-db-prod
+    database: yoga-sadhana
+    role: postgres
+    floor: 256K
+    drill_tables: [tenants, clients, bookings, client_packages, stripe_payments]
+
   # Traefik's ACME account key and issued certificates: acme.json (letsencrypt, DNS-01 for
   # teeko.ai) and acme-tls.json (le-tls, the reservetoday.app booking names). Re-issued if
   # lost, but only within Let's Encrypt's rate limits. 92K live (2026-09-14), two ~41 KB
@@ -46,12 +61,11 @@ targets:
     floor: 32K
 
 skip:
-  - volume: booking_prod_pgdata
-    reason: >-
-      booking-prod is fresh -- seed data only, no studio on it yet (#26 backed up staging
-      alone for this reason). Add a postgres target here before the first studio moves to prod.
   - volume: backup_restic_cache
-    reason: restic's local index cache; rebuilt from the repository in R2 on the next run.
+    reason: >-
+      restic's local index cache; rebuilt from the repository in R2 on the next run. Also holds
+      exports.log, the record of dumps pulled to laptops -- deleting the volume loses it
+      (docs/backup-restore.md, "A dump on a developer's machine").
   - volume: monitoring_alloy_data
     reason: >-
       Alloy's log read positions and metrics WAL. Losing it re-ships a few minutes of recent

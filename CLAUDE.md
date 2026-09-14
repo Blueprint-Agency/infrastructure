@@ -111,9 +111,12 @@ host whose on-host dirs differ from the repo: a single `booking` stack fans out 
 > has no online export; the decision, the failure modes and the round-trip drill are "The mail
 > store" in the runbook. Never back it up as a plain `volume` target. The job's `Dockerfile` and
 > `bin/` are copied into both stacks and CI fails if they drift: change both in one commit.
-> Before any production migration or import, run `docker exec backup /app/bin/backup.sh`.
-> Runbook: `docs/backup-restore.md`. `scripts/backup.sh` is a same-host volume tar, **not** a
-> backup of a running Postgres.
+> Before any production migration or import, run `docker exec backup /app/bin/backup.sh`
+> (booking-system's deploy does it for the instance it migrates, #30). Restoring over live is
+> `restore-live.sh <target> <id> --confirm <target>` — never the drill; a laptop copy of member
+> data is `scripts/pull-dump.sh`, logged on the host. Hostinger's weekly VM backups are the
+> second layer: `scripts/hypervisor-backups.py status`. Runbook: `docs/backup-restore.md`.
+> `scripts/backup.sh` is a same-host volume tar, **not** a backup of a running Postgres.
 
 > **Monitoring: bpvps1 and bpvps2** (#23, #25). Each host's `monitoring` stack runs one Grafana
 > Alloy (`alloy`, host network, no published port) shipping host + container metrics and container

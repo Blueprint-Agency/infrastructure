@@ -196,9 +196,12 @@ EOF
       ;;
   esac
 
-  log "$name: pruning 7 daily / 4 weekly / 6 monthly" >&2
+  # --keep-within 7d: every snapshot of the last week survives, not just the newest of each day.
+  # Without it, a second deploy's pre-migration snapshot forgets the first one's the same day --
+  # the one that made the first migration reversible.
+  log "$name: pruning -- everything from 7 days, then 7 daily / 4 weekly / 6 monthly" >&2
   restic forget --host "$BACKUP_HOST" --tag "$name" --group-by host,tags \
-    --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune >&2 || return 1
+    --keep-within 7d --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune >&2 || return 1
 
   rm -rf "$dir"
   echo "$bytes"

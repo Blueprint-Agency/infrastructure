@@ -108,10 +108,16 @@ jobs:
         run: bash scripts/test_renew_cert.sh
 
       # The pure half of the backup job: the targets file parser, the floor-size guard, the
-      # heartbeat metric, the healthcheck, the RLS dump-role guard and the restore drill's
-      # row-count comparison. Needs yq, which the runner image ships.
+      # heartbeat metric, the healthcheck, the RLS dump-role guard, the restore drill's
+      # row-count comparison, the restore-to-live confirmation and the export log line.
+      # Needs yq, which the runner image ships.
       - name: Self-check the backup job helpers
         run: bash scripts/test_backup_lib.sh
+
+      # Weekly-backup freshness, "no snapshot" read from Hostinger's id 0, and the action poll
+      # that must end on success. No request is made.
+      - name: Self-check the hypervisor backup checks
+        run: python3 scripts/test_hypervisor_backups.py
 
       # Every in-scope host in vps/hosts.json has a backup targets.yml, and every named volume
       # in its compose files is backed up or skipped with a reason. A host declared

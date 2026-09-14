@@ -2,6 +2,18 @@
 # Back up a host's named Docker volumes to /home/deploy/backups/<timestamp>/ ON that host.
 # Usage: ./scripts/backup.sh bp-vps3-prod
 #
+# ⚠️ NOT THE BACKUP SYSTEM. On bpvps1 and bpvps2 every database and the mail store is covered
+# by each host's `backup` stack -- nightly, encrypted, off-site in R2, drilled -- plus
+# Hostinger's weekly VM backups (docs/backup-restore.md). Do not use this there.
+#
+# Tarring a RUNNING store is not a backup: a Postgres, MariaDB or RocksDB (Stalwart) volume
+# read while the server writes to it can restore as a corrupt or inconsistent copy, and the tar
+# still exits 0. And the copy stays on the same disk as the original.
+#
+# It remains the ONLY option for the three Teeko hosts (vps1-staging, vps2-prod, vps3-prod),
+# which are out of scope for backups (#4) and have nothing else. For a database there, stop its
+# container first, or pg_dump it instead.
+#
 # Runs over ssh in the same shape as vps/shared/snapshot-host.sh -- the previous version
 # took a <vps-alias> argument and then ran docker LOCALLY, so it never touched a VPS.
 # Writes under /home/deploy because `deploy` has no sudo and cannot create /opt/backups.

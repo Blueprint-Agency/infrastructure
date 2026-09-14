@@ -236,5 +236,35 @@ RJSON=$'{"message_type":"status","percent_done":1}\n{"message_type":"summary","f
 says 'the summary line carries the id'    '4f2a9c1b8d7e6f5a4f2a9c1b8d7e6f5a4f2a9c1b8d7e6f5a4f2a9c1b8d7e6f5a' restic_snapshot_id "$RJSON"
 ok   'no summary line is refused'         1 restic_snapshot_id '{"message_type":"status","percent_done":0.5}'
 
+# ── restore to LIVE: a drill must never be able to become an outage ─────────────────
+# restore-live.sh takes the instance name twice. A difference, a missing snapshot, or a kind
+# with no scripted live restore is refused before anything is touched.
+ok   'live restore: name typed twice passes'     0 check_live_restore booking-staging postgres 91e3ea7a booking-staging
+ok   'live restore: a different confirmation is refused' 1 check_live_restore booking-staging postgres 91e3ea7a booking-prod
+says 'the refusal names both spellings'          "'booking-prod' is not 'booking-staging'" check_live_restore booking-staging postgres 91e3ea7a booking-prod
+ok   'live restore: no confirmation is refused'  1 check_live_restore booking-staging postgres 91e3ea7a ''
+ok   'live restore: no snapshot is refused -- name one, even if it is latest' 1 check_live_restore booking-staging postgres '' booking-staging
+ok   'live restore: latest, typed out, passes'   0 check_live_restore booking-staging postgres latest booking-staging
+ok   'live restore: a volume target is refused'  1 check_live_restore traefik-certs volume latest traefik-certs
+says 'the refusal points at the runbook'         'docs/backup-restore.md' check_live_restore mail-store stalwart latest mail-store
+ok   'live restore: an unknown target is refused' 1 check_live_restore nope '' latest nope
+
+# The restored copy and the set-aside original get names derived from the live database. A
+# name past Postgres's 63 bytes is silently TRUNCATED, and two names could then collide.
+says 'side names: restore and pre-restore'       'yoga-sadhana_restore_20260914t0300 yoga-sadhana_pre_restore_20260914t0300' restore_db_names yoga-sadhana 20260914t0300
+ok   'side names: past 63 bytes is refused'      1 restore_db_names "$(printf 'd%.0s' $(seq 1 50))" 20260914t0300
+
+# ── export to a laptop: explicit and logged, or not at all ──────────────────────────
+says 'export log: one line, every field'         'EXPORT target=booking-staging snapshot=91e3ea7a who="Chris Kwek" reason="reproduce #131"' export_log_line booking-staging 91e3ea7a 'Chris Kwek' 'reproduce #131'
+ok   'export log: no reason is refused'          1 export_log_line booking-staging 91e3ea7a chris ''
+ok   'export log: no name is refused'            1 export_log_line booking-staging 91e3ea7a '' 'reproduce #131'
+ok   'export log: a newline cannot forge a second line' 1 export_log_line booking-staging 91e3ea7a chris $'x\nEXPORT target=fake'
+ok   'export log: a double quote is refused'     1 export_log_line booking-staging 91e3ea7a chris 'say "hi"'
+
+# restic snapshots --json: [] for an id that matches nothing, and restic still exits 0.
+says 'snapshot id: the first short id'           '7011ae42' snapshot_short_id '[{"id":"7011ae42ffff","short_id":"7011ae42"}]'
+ok   'snapshot id: an empty list is refused'     1 snapshot_short_id '[]'
+ok   'snapshot id: not JSON is refused'          1 snapshot_short_id 'Fatal: repository locked'
+
 printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
 [[ "$FAILED" == 0 ]]

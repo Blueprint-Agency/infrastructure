@@ -292,6 +292,77 @@ compare_counts() {
     }'
 }
 
+# check_live_restore <target> <kind> <snapshot> <confirm>
+#
+# restore-live.sh's gate, applied before it touches anything. The instance name is typed
+# twice -- as the target and again as <confirm> -- so a drill command edited in a hurry, or
+# pasted from shell history, cannot become a restore over live data. The snapshot must be
+# named, even when it is `latest`: "whatever is newest" is a decision, not a default.
+# Only postgres has a scripted live restore; every other kind is refused with a pointer.
+check_live_restore() {
+  if [ -z "$4" ]; then
+    echo "refusing: confirm by typing the instance name a second time: --confirm $1" >&2
+    return 1
+  fi
+  if [ "$4" != "$1" ]; then
+    echo "refusing: '$4' is not '$1' -- the confirmation must repeat the instance name exactly" >&2
+    return 1
+  fi
+  if [ -z "$3" ]; then
+    echo "refusing: name the snapshot to restore (an id from 'restic snapshots', or latest)" >&2
+    return 1
+  fi
+  case $2 in
+    postgres) return 0 ;;
+    '') echo "refusing: no target named '$1'" >&2 ;;
+    *) echo "refusing: $1 is a $2 target; only postgres has a scripted live restore -- see docs/backup-restore.md, \"Restore to live\"" >&2 ;;
+  esac
+  return 1
+}
+
+# restore_db_names <database> <stamp>  ->  "<restored copy> <set-aside original>"
+#
+# Both live beside the live database until someone drops them. Postgres truncates an
+# identifier past 63 bytes without an error, which could make two restores' names collide,
+# so a name that long is refused instead.
+restore_db_names() {
+  _new="$1_restore_$2"
+  _old="$1_pre_restore_$2"
+  if [ "${#_old}" -gt 63 ]; then
+    echo "restore_db_names: '$_old' is longer than Postgres's 63-byte identifier limit" >&2
+    return 1
+  fi
+  echo "$_new $_old"
+}
+
+# export_log_line <target> <snapshot> <who> <reason>  ->  one log line
+#
+# export-dump.sh hands a plaintext dump of member data to a laptop. That is allowed only as a
+# named, reasoned act that leaves this line in the job's log. Blank fields are refused, and so
+# are newlines and double quotes, which could forge or break a line someone later greps.
+export_log_line() {
+  if [ -z "$3" ] || [ -z "$4" ]; then
+    echo "refusing: an export needs --who and --reason" >&2
+    return 1
+  fi
+  case "$1$2$3$4" in
+    *'
+'* | *'"'*) echo "refusing: no newlines or double quotes in an export's fields" >&2; return 1 ;;
+  esac
+  printf 'EXPORT target=%s snapshot=%s who="%s" reason="%s"\n' "$1" "$2" "$3" "$4"
+}
+
+# snapshot_short_id <restic snapshots --json output>  ->  the first snapshot's short id
+#
+# `restic snapshots <id>` exits 0 when the id matches nothing, printing []. So "no such
+# snapshot" is read from the JSON, while the caller keeps restic's own exit status separate --
+# an unreachable repository must not read as a missing snapshot.
+snapshot_short_id() {
+  _id=$(printf '%s' "$1" | yq -p json -r '.[0].short_id // ""' 2>/dev/null) || _id=
+  [ -n "$_id" ] || { echo "no matching snapshot" >&2; return 1; }
+  echo "$_id"
+}
+
 # ── JMAP, for the stalwart kind ──────────────────────────────────────────────────────
 # The mail drill counts every account's messages and bytes on the live server and on the
 # restored copy -- the numbers scripts/mail-inventory.py records. These read one response
