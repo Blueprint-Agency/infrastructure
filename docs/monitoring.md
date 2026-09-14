@@ -9,9 +9,16 @@ The three Teeko hosts are **out of scope by decision** (#22): each carries
 `no_monitoring: <reason>` in `vps/hosts.json`, and `check-monitoring.py` prints those reasons on
 every run. Nothing on vps1-staging, vps2-prod or vps3-prod is watched.
 
-> **Repo side done, live side pending.** As of 2026-09-14 neither host has deployed the stack
-> and Grafana Cloud is not set up (no `GRAFANA_*` in `.env`). Everything marked _pending_ below
-> waits on "First-time setup" and a deploy.
+> **Live since 2026-09-14.** Grafana Cloud stack `blueprintdigital`, region
+> `prod-ap-southeast-1`. Both hosts run `alloy` and `probes` and are shipping metrics and logs;
+> 11 Synthetic checks probe every public name from Singapore, Tokyo and Mumbai; alerts deliver
+> to Discord. What remains _pending_ below is **testing**, not deployment — and the two that
+> matter most, the Traefik stop (#24) and a real backup heartbeat going stale and recovering,
+> have not been run. Deployed is not the same as proven.
+
+> ⚠️ **The account is on a trial that ends 2026-09-27.** Limits today are Pro, not free, so any
+> usage figure read before then is not the one you will live with. The `series-budget` rule
+> hardcodes 8000 = 80% of the free tier's 10,000. Revisit both when the trial ends.
 
 ## The pieces
 
@@ -360,11 +367,22 @@ own addresses. **No address is committed here** — this repository is public.
    put them in `.env` as `GRAFANA_SM_URL` (`https://` + the address) and `GRAFANA_SM_TOKEN`.
 5. Configure alert delivery in the console — **Grafana's own paths only** (#22: no second
    alerting vendor, so no Telegram, ntfy or Pushover):
-   - contact point **email**, to the operator's address;
-   - contact point **phone**: the **Grafana IRM** mobile app, signed in as the operator;
-   - notification policy: `severity=critical` → phone + email, **group wait 10s** (the
-     `endpoint-down` timing in `grafana/rules/endpoints.yml` needs it); `severity=warning` →
-     email; `severity=info` → email only (the textfile canary must never page).
+   **Contact points and the routing tree are a file** — `grafana/alerting/notifications.yml`,
+   applied by `grafana-apply.py` like the dashboards and rules. The only manual part is
+   creating the Discord webhook (Server Settings → Integrations → Webhooks → New Webhook) and
+   putting its URL in `.env` as `DISCORD_WEBHOOK_URL`. It is a credential and this repository is
+   public, so it never goes in the yaml; an unset one fails the apply rather than creating a
+   contact point that silently delivers nothing.
+
+   As configured on 2026-09-14: one contact point, `discord`. `critical` → 10s group wait (the
+   `endpoint-down` timing in `grafana/rules/endpoints.yml` needs it), `warning` → 1m,
+   `info` → 5m and a day between repeats, because `info` is the textfile canary and it is
+   *meant* to fire during the seam test.
+
+   > ⚠️ **Discord will not reliably wake anyone at 2am** — phone Do Not Disturb silences it.
+   > Set that server to "All Messages" and add it to the DND exceptions, or accept that an
+   > overnight critical is read in the morning. Email is **not** configured yet; when it is,
+   > `critical` should gain an email integration beside the Discord one.
 
 ### Applying dashboards and rules
 
@@ -434,8 +452,8 @@ window** agreed in advance, and is recorded here.
 | Mail port down | Announced window on bpvps1 — interrupts mail. Not run by default: the prober is proven above, and stopping Stalwart to prove the rule costs real mail. If run: `docker stop stalwart`, alert within ~3 min, `docker start stalwart` | _not scheduled_ |
 | Agent overhead | `docker stats --no-stream alloy probes` over a week, both hosts | _pending deploy_ |
 | **Traefik stopped → phone alert (#24, the headline test)** | Announced window — interrupts the booking API. Silence nothing. `ssh bp-bpvps2 'docker stop traefik'`, note the time. Pass: `endpoint-down` for `api.reservetoday.app` and `api.dev.reservetoday.app` reaches the **phone** within 5 min, naming **bpvps2**. Then `ssh bp-bpvps2 'docker start traefik'` at once, and confirm it resolves. `container-down-bpvps2` for `traefik` fires too — expected | _pending Grafana Cloud setup + an agreed window_ |
-| Textfile seam | [`textfile-metrics.md`](textfile-metrics.md), "Testing the seam" — no window needed. Pass: value queryable within a minute; `textfile-canary-stale` fires when left, resolves when refreshed | _pending deploy_ |
-| Backup heartbeat (#27) | Blocked on the seam; run right after it. [`backup-restore.md`](backup-restore.md) | _pending deploy_ |
-| TLS days vs `openssl` | Dashboard **Endpoints** → *TLS days left* for `api.reservetoday.app`, against `echo \| openssl s_client -servername api.reservetoday.app -connect api.reservetoday.app:443 2>/dev/null \| openssl x509 -noout -enddate`. Pass: same day count. `openssl` side on 2026-09-14: `notAfter=Nov 7 15:40:49 2026 GMT` (≈54 days) | _pending Grafana Cloud setup_ |
+| Textfile seam | [`textfile-metrics.md`](textfile-metrics.md), "Testing the seam" — no window needed. Pass: value queryable within a minute; `textfile-canary-stale` fires when left, resolves when refreshed | **Pass, 2026-09-14 on bpvps2** (times UTC). Written 14:04:44, queryable 14:05:44 — 60 s, one scrape interval. Left to age: `Pending` 14:10:32, **`Alerting` 14:11:34 — 6 min 50 s after the write**, ~50 s later than the documented 5 min + 1 min, which is scrape/evaluation alignment, not a missed alert. Rewritten 14:11:46, back to `Normal` 14:13:30 (1 min 44 s). `canary.prom` deleted 14:13:39; series gone and the rule inert by 14:14:55 |
+| Backup heartbeat (#27) | Blocked on the seam; run right after it. [`backup-restore.md`](backup-restore.md) | **Negative case observed live, 2026-09-14** — not simulated: bpvps1's backup stack deployed today and its first run is 04:30 KL, so it has no heartbeat yet. `count by (host) (backup_last_success_timestamp_seconds)` returns **bpvps2 only** (1 target, `booking-staging`); bpvps1 has no series. "Backup heartbeat stale on bpvps1" is **firing**, `Alerting` since 13:44:10 UTC — the absence half of the rule, exactly as intended. "Backup heartbeat stale on bpvps2" is **inactive** (`Normal (NoData)` = the query returns nothing, which is health). One host red, one green, each for the right reason. _The positive case — a real heartbeat on bpvps1 going stale and resolving — still needs the first 04:30 run._ |
+| TLS days vs `openssl` | Dashboard **Endpoints** → *TLS days left* for `api.reservetoday.app`, against `echo \| openssl s_client -servername api.reservetoday.app -connect api.reservetoday.app:443 2>/dev/null \| openssl x509 -noout -enddate`. Pass: same day count. `openssl` side on 2026-09-14: `notAfter=Nov 7 15:40:49 2026 GMT` (≈54 days) | **Pass, 2026-09-14.** `probe_ssl_earliest_cert_expiry{job="api.reservetoday.app"}` = `1794066049` from all three probes (Singapore, Tokyo, Mumbai) = **Nov 7 15:40:49 2026 UTC**, ≈54.1 days left — **identical to the second** to `openssl`'s `notAfter`. Checked against the raw metric, not the dashboard panel |
 | Every name has a check | `python vps/shared/public-endpoints.py` lists 11 names; **Synthetics → Checks** shows the same 11 after apply | repo side: 11 names, all answering on 2026-09-14. Account side _pending_ |
 | Budget after a week | "Budget" above | _pending a week of data_ |

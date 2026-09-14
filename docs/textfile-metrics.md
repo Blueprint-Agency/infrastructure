@@ -4,10 +4,10 @@ The one door through which a cross-cutting signal — the backup heartbeat, the 
 key-expiry check, anything later — enters monitoring. A new signal is a file written into a
 directory, never a new exporter, integration or alerting vendor (#22).
 
-> **Status: both halves in the repo on bpvps1 and bpvps2 (#24, #25).** The backup job (#27, #28)
+> **Status: live and tested end to end on bpvps2, 2026-09-14 (#24).** The backup job (#27, #28)
 > and the monitoring stack's own `probes` container write; Alloy's textfile collector reads;
-> `grafana/rules/textfile.yml` and `hosts.yml` alert. The end-to-end test below is _pending the
-> first deploy of the monitoring stack_.
+> `grafana/rules/textfile.yml` and `hosts.yml` alert. The seam test below was run and passed all
+> four legs — write, metric, alert, resolve. Timings are in `monitoring.md`, "Canary tests".
 
 ## The contract
 
