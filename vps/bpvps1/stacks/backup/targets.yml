@@ -75,6 +75,10 @@ skip:
       restic's local index cache; rebuilt from the repository in R2 on the next run. It also
       holds stopped-by-backup/, the record of a container mail-store stopped -- live state
       that only matters mid-run, and a restore of last night's copy would be wrong anyway.
+  - volume: monitoring_alloy_data
+    reason: >-
+      Alloy's log read positions and metrics WAL. Losing it re-ships a few minutes of recent
+      logs once and drops unsent samples; the data itself lives in Grafana Cloud.
   - volume: monitoring_textfile
     reason: >-
       Heartbeat metrics. backup.prom is rewritten by every successful run; losing it reads

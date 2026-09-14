@@ -35,8 +35,8 @@ services:
       BACKUP_TARGETS: /app/targets.yml
       # The throwaway containers that read volume targets run this same image.
       BACKUP_IMAGE: blueprint-backup:local
-      # Heartbeat: backup.prom. Contract: docs/textfile-metrics.md. No monitoring agent reads
-      # it on this host yet; the healthcheck below does.
+      # Heartbeat: backup.prom. Contract: docs/textfile-metrics.md. Read by this host's monitoring
+      # agent (#25, rule backup-stale-bpvps1) and by the healthcheck below.
       TEXTFILE_DIR: /textfile
       # Healthcheck limit: a day, plus an hour for tonight's run to finish before the
       # previous success counts as missed.
@@ -67,8 +67,8 @@ services:
 volumes:
   backup_cache:
     name: backup_restic_cache
-  # The same external volume as bpvps2, so a monitoring stack landing here later reads it
-  # without a change to this file. Created by post-sync.sh.
+  # Shared with the monitoring stack, so it belongs to neither. Created by post-sync.sh here
+  # and in monitoring's, whichever deploys first.
   textfile:
     external: true
     name: monitoring_textfile

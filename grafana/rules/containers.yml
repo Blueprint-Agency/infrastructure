@@ -19,6 +19,61 @@ groups:
     folder: Monitoring
     interval: 1m
     rules:
+      # bpvps1: the mail platform (stalwart, bulwark, unbound -- all three are required), Kaiteki,
+      # WordPress. stalwart/traefik/wordpress are root-owned stacks CI does not deploy, but their
+      # containers report through the Docker socket like any other (verified 2026-09-14).
+      # #29's nightly mail-store snapshot stops stalwart at 04:30: 4 s measured, well inside 3m.
+      # Its ~13 min worst case fires this -- correctly, mail is down; `docker logs backup` first.
+      - uid: container-down-bpvps1
+        title: Container down on bpvps1
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                absent_over_time(container_last_seen{host="bpvps1", container="traefik"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps1", container="stalwart"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps1", container="bulwark"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps1", container="unbound"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps1", container="kaiteki"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps1", container="kaiteki-staging"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps1", container="wordpress"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps1", container="wp-db"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps1", container="backup"}[3m])
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: critical
+          host: bpvps1
+        annotations:
+          summary: "{{ $labels.container }} on {{ $labels.host }} has reported no metrics for 3 minutes"
+          description: >-
+            The container is stopped, crash-looping, or was removed. stalwart, bulwark or unbound
+            down means mail for all three domains. If every container on the host fires at once,
+            the monitoring agent (container `alloy`) or the host itself is down instead.
+            Runbook: docs/monitoring.md.
+
       - uid: container-down-bpvps2
         title: Container down on bpvps2
         condition: C

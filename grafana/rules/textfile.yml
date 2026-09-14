@@ -1,10 +1,13 @@
-# Alerts on the textfile seam (#24) -- signals producers write into the monitoring_textfile
+# Alerts on the textfile seam (#24, #25) -- signals producers write into the monitoring_textfile
 # volume and the agent's textfile collector reads. Contract: docs/textfile-metrics.md.
 # Applied by scripts/grafana-apply.py; this file is the copy of record, not the web UI.
 #
 # A producer reports when it last SUCCEEDED, never that it failed -- a stopped or crashed
 # producer cannot report anything. So every producer's rule is a staleness rule: the age of its
 # timestamp, OR its series being absent (a deleted file must read as failure, not silence).
+# The absent half has to name the host, so staleness rules are one per host, and CI
+# (check-monitoring.py) requires them for every monitored host: probes-stale-<host> always,
+# backup-stale-<host> where the host runs the backup job.
 apiVersion: 1
 groups:
   - orgId: 1
@@ -14,35 +17,111 @@ groups:
     rules:
       # The seam itself. The collector skips a file it cannot parse and sets this to 1 -- which
       # would otherwise look exactly like that producer going stale, and blame the wrong thing.
-      - uid: textfile-unreadable-bpvps2
-        title: Textfile metrics unreadable on bpvps2
+      # A present value, so one rule covers every host.
+      - uid: textfile-unreadable
+        title: Textfile metrics unreadable
         condition: C
         data:
           - refId: A
-            relativeTimeRange:
-              from: 600
-              to: 0
+            relativeTimeRange: {from: 600, to: 0}
             datasourceUid: grafanacloud-prom
             model:
               refId: A
               instant: true
               range: false
-              expr: max by (host) (node_textfile_scrape_error{host="bpvps2"})
+              expr: max by (host) (node_textfile_scrape_error)
           - refId: C
-            relativeTimeRange:
-              from: 600
-              to: 0
+            relativeTimeRange: {from: 600, to: 0}
             datasourceUid: __expr__
             model:
               refId: C
               type: threshold
               expression: A
               conditions:
-                - evaluator:
-                    type: gt
-                    params: [0]
-        # No series means no agent. container-down-bpvps2 exempts the agent itself, but reports
-        # it the only way it can: every other container on the host goes absent at once.
+                - evaluator: {type: gt, params: [0]}
+        # No series means no agent -- container-down-<host> reports that, the only way it can:
+        # every other container on the host goes absent at once.
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A *.prom file on {{ $labels.host }} cannot be parsed"
+          description: >-
+            The agent skips a malformed file, so that producer's metrics stop and its staleness
+            alert follows. `ssh bp-{{ $labels.host }} 'docker logs --tail 50 alloy'` names the file.
+            The usual cause is a producer writing in place instead of tmp + mv. docs/textfile-metrics.md.
+
+      # ── Producer: the textfile probes (#25) -- probes/bin/probe.sh in the monitoring stack ──
+      # Each job's file carries its own heartbeat AND how old that may get (5 min for the
+      # per-minute jobs, 8 days for the weekly Tailscale check), so one rule serves every job.
+      # Fires with probe=... naming which one stopped (the label is `probe`, not `job`: the
+      # agent's scrape owns `job` and renames a file's own to exported_job). A job that could not read its source (psql
+      # failed, tailscaled did not answer, the mail prober found it IS the mail host) writes
+      # nothing on purpose, and lands here.
+      - uid: probes-stale-bpvps1
+        title: Probe stopped on bpvps1
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 900, to: 0}
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                (time() - probes_last_success_timestamp_seconds{host="bpvps1"}
+                  > on (host, probe) probes_max_age_seconds{host="bpvps1"})
+                or absent_over_time(probes_last_success_timestamp_seconds{host="bpvps1"}[15m])
+          - refId: C
+            relativeTimeRange: {from: 900, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+          host: bpvps1
+        annotations:
+          summary: "bpvps1 probe {{ $labels.probe }} has not completed in time (no probe label: no probe heartbeat at all)"
+          description: >-
+            `ssh bp-bpvps1 'docker ps --filter name=probes; docker logs --tail 50 probes'` -- a failing
+            job logs why. While it is stale, the alert it feeds (restarts, Postgres, Tailscale) cannot
+            fire. Runbook: docs/monitoring.md.
+
+      - uid: probes-stale-bpvps2
+        title: Probe stopped on bpvps2
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 900, to: 0}
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                (time() - probes_last_success_timestamp_seconds{host="bpvps2"}
+                  > on (host, probe) probes_max_age_seconds{host="bpvps2"})
+                or absent_over_time(probes_last_success_timestamp_seconds{host="bpvps2"}[15m])
+                or absent_over_time(probes_last_success_timestamp_seconds{host="bpvps2", probe="mail"}[15m])
+          - refId: C
+            relativeTimeRange: {from: 900, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
         noDataState: OK
         execErrState: Error
         for: 5m
@@ -50,22 +129,59 @@ groups:
           severity: warning
           host: bpvps2
         annotations:
-          summary: "A *.prom file on {{ $labels.host }} cannot be parsed"
+          summary: "bpvps2 probe {{ $labels.probe }} has not completed in time (no probe label: no probe heartbeat at all)"
           description: >-
-            The agent skips a malformed file, so that producer's metrics stop and its staleness
-            alert follows. `ssh bp-bpvps2 'docker logs --tail 50 alloy'` names the file. The usual
-            cause is a producer writing in place instead of tmp + mv. docs/textfile-metrics.md.
+            `ssh bp-bpvps2 'docker ps --filter name=probes; docker logs --tail 50 probes'` -- a failing
+            job logs why. probe=mail stale or absent means bpvps1's mail ports are NOT being watched --
+            bpvps2 is the only mail prober, so its mail heartbeat is required, not optional (was
+            MAIL_PROBE_TARGET removed from its compose?). Runbook:
+            docs/monitoring.md.
 
-      # Producer: the backup job (#27), after each target's snapshot. Nightly at 03:30 KL, so
-      # 26 h is one missed night plus slack for a slow run.
+      # ── Producer: the backup job (#27, #28), after each target's snapshot ────────────────
+      # Nightly (bpvps2 03:30, bpvps1 04:30 KL), so 26 h is one missed night plus slack.
+      - uid: backup-stale-bpvps1
+        title: Backup heartbeat stale on bpvps1
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 900, to: 0}
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                (time() - backup_last_success_timestamp_seconds{host="bpvps1"} > 26 * 3600)
+                or absent_over_time(backup_last_success_timestamp_seconds{host="bpvps1"}[15m])
+          - refId: C
+            relativeTimeRange: {from: 900, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: critical
+          host: bpvps1
+        annotations:
+          summary: "bpvps1 backup {{ $labels.target }} has not succeeded in 26 hours (no target label: no heartbeat at all)"
+          description: >-
+            Either a target's snapshot failed last night, or backup.prom is gone. Check
+            `ssh bp-bpvps1 'docker ps --filter name=backup; docker logs --tail 100 backup'`. If
+            the agent itself is down, container-down-bpvps1 fires alongside. Runbook:
+            docs/backup-restore.md.
+
       - uid: backup-stale-bpvps2
         title: Backup heartbeat stale on bpvps2
         condition: C
         data:
           - refId: A
-            relativeTimeRange:
-              from: 900
-              to: 0
+            relativeTimeRange: {from: 900, to: 0}
             datasourceUid: grafanacloud-prom
             model:
               refId: A
@@ -75,18 +191,14 @@ groups:
                 (time() - backup_last_success_timestamp_seconds{host="bpvps2"} > 26 * 3600)
                 or absent_over_time(backup_last_success_timestamp_seconds{host="bpvps2"}[15m])
           - refId: C
-            relativeTimeRange:
-              from: 900
-              to: 0
+            relativeTimeRange: {from: 900, to: 0}
             datasourceUid: __expr__
             model:
               refId: C
               type: threshold
               expression: A
               conditions:
-                - evaluator:
-                    type: gt
-                    params: [0]
+                - evaluator: {type: gt, params: [0]}
         # Every target fresh -> the query returns nothing. That is the healthy state.
         noDataState: OK
         execErrState: Error
@@ -103,43 +215,36 @@ groups:
             docs/backup-restore.md.
 
       # Producer: canary.prom -- the seam's own test fixture, not a service. Inert while the file
-      # does not exist. The test in docs/monitoring.md writes it, lets it age past five minutes,
-      # refreshes it, then deletes it. Kept permanently so that test can be rerun as it is.
-      - uid: textfile-canary-stale-bpvps2
-        title: Textfile canary stale on bpvps2
+      # does not exist on any host. The test in docs/textfile-metrics.md writes it, lets it age
+      # past five minutes, refreshes it, then deletes it. Kept permanently so it can be rerun.
+      - uid: textfile-canary-stale
+        title: Textfile canary stale
         condition: C
         data:
           - refId: A
-            relativeTimeRange:
-              from: 600
-              to: 0
+            relativeTimeRange: {from: 600, to: 0}
             datasourceUid: grafanacloud-prom
             model:
               refId: A
               instant: true
               range: false
-              expr: time() - textfile_canary_timestamp_seconds{host="bpvps2"}
+              expr: max by (host) (time() - textfile_canary_timestamp_seconds)
           - refId: C
-            relativeTimeRange:
-              from: 600
-              to: 0
+            relativeTimeRange: {from: 600, to: 0}
             datasourceUid: __expr__
             model:
               refId: C
               type: threshold
               expression: A
               conditions:
-                - evaluator:
-                    type: gt
-                    params: [300]
+                - evaluator: {type: gt, params: [300]}
         noDataState: OK
         execErrState: Error
         for: 1m
         labels:
           severity: info
-          host: bpvps2
         annotations:
           summary: "textfile canary on {{ $labels.host }} is {{ humanizeDuration $values.A.Value }} old"
           description: >-
-            Expected only during the textfile seam test in docs/monitoring.md. Outside it, someone
+            Expected only during the textfile seam test in docs/textfile-metrics.md. Outside it, someone
             left /textfile/canary.prom behind: delete it and this resolves.

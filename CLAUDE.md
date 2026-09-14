@@ -77,7 +77,7 @@ compose` is still SSH.
 | `bp-vps2-prod` | Production | 4 vCPU / 16GB / 200GB |
 | `bp-vps3-prod` | Production | 4 vCPU / 16GB / 200GB |
 | `bp-bpvps1` | Kaiteki (legacy + revamp) + **the mail platform** (all three domains) | 187.127.122.41 |
-| `bp-bpvps2` | Booking-system + its `backup` and `monitoring` stacks — no mail since 2026-09-12 (#12) | 187.127.207.82 |
+| `bp-bpvps2` | Booking-system + its `backup` and `monitoring` stacks (the mail-port prober for bpvps1) — no mail since 2026-09-12 (#12) | 187.127.207.82 |
 
 SSH key: `~/.ssh/infra_ed25519`. All hosts log in as **`deploy`**, not root — `deploy` is in the `docker` group and owns `/root/stacks`. Hosts defined in `~/.ssh/config`.
 
@@ -115,12 +115,17 @@ host whose on-host dirs differ from the repo: a single `booking` stack fans out 
 > Runbook: `docs/backup-restore.md`. `scripts/backup.sh` is a same-host volume tar, **not** a
 > backup of a running Postgres.
 
-> **Monitoring: bpvps2 only so far** (#23). Its `monitoring` stack runs one Grafana Alloy
-> (`alloy`, host network, no published port) shipping host + container metrics and container
-> logs to Grafana Cloud. What ships is `metrics.allowlist` in that stack; dashboards and alert
-> rules are `grafana/`, applied by `scripts/grafana-apply.py` — never edited in the UI. **A new
-> container on a monitored host means a line in `grafana/rules/containers.yml`**, or CI fails
-> (`vps/shared/check-monitoring.py`). Runbook: `docs/monitoring.md`.
+> **Monitoring: bpvps1 and bpvps2** (#23, #25). Each host's `monitoring` stack runs one Grafana
+> Alloy (`alloy`, host network, no published port) shipping host + container metrics and container
+> logs to Grafana Cloud, plus `probes` (restart counts, Postgres connections, Tailscale key
+> expiry, and — on bpvps2 only — bpvps1's mail ports). Everything in that stack except
+> `docker-compose.yml` and `ci/` is **one implementation copied to both hosts**; CI fails if they
+> drift. What ships is `metrics.allowlist`; dashboards and alert rules are `grafana/`, applied by
+> `scripts/grafana-apply.py` — never edited in the UI. **A new container on a monitored host means
+> a line in `grafana/rules/containers.yml`**, and a host with neither a monitoring stack nor
+> `no_monitoring: <reason>` fails CI (`vps/shared/check-monitoring.py`). Mail ports are never
+> probed from bpvps1 or a laptop. Runbook — every alert's meaning and first three checks, and the
+> tune-or-delete rule: `docs/monitoring.md`. Deployed: _not yet_ (Grafana Cloud setup pending).
 
 > **What a host backs up is `vps/<host>/stacks/backup/targets.yml`** (#27) — every **in-scope**
 > host has one, and CI fails if a named volume in that host's compose files is neither in it nor
@@ -129,8 +134,8 @@ host whose on-host dirs differ from the repo: a single `booking` stack fans out 
 > `exclude`.
 
 > ⚠️ **Backups and monitoring cover bpvps1 and bpvps2 only.** vps1-staging, vps2-prod and
-> vps3-prod are out of scope by decision (#4, #22) and carry `no_backups: <reason>` in
-> `vps/hosts.json` instead of a targets file. **Nothing on those three is backed up or
+> vps3-prod are out of scope by decision (#4, #22) and carry `no_backups: <reason>` and
+> `no_monitoring: <reason>` in `vps/hosts.json` instead of a targets file or monitoring stack. **Nothing on those three is backed up or
 > monitored** — not ehailing's production Postgres, not either n8n (database *and* encryption
 > key), not the WABA database, not either teeko-website database. The reason string on each host
 > names its own casualties, `check-backup-targets.py` prints them on every run, and a leftover

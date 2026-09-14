@@ -2,3 +2,5 @@
 # Read verbatim by Grafana Alloy on Linux hosts: the allowlist's lines become one regex.
 *.alloy text eol=lf
 *.allowlist text eol=lf
+# busybox crond reads these verbatim; a CR on a line is part of the command.
+crontab text eol=lf

@@ -69,6 +69,35 @@ services:
     cpus: 0.5
     mem_limit: 384m
 
+  # The textfile probes (#25): restart counts, Postgres connections, Tailscale key expiry and --
+  # on this host only -- bpvps1's mail ports. Writes *.prom into the textfile volume the agent
+  # reads. What each job does and how it fails: probes/bin/probe.sh. Identical on every host;
+  # only the environment below differs.
+  probes:
+    build: ./probes
+    image: blueprint-probes:local
+    pull_policy: build
+    container_name: probes
+    restart: unless-stopped
+    # The host's addresses, so the mail job can tell whether it IS the mail host, and a real
+    # outbound path to the target rather than a bridge's NAT.
+    network_mode: host
+    environment:
+      TZ: Asia/Kuala_Lumpur
+      # Probed from here because it is the only in-scope host that is NOT the mail host, and a
+      # laptop's ISP blocks outbound 25. bpvps1 leaves this unset. probe.sh refuses to probe a
+      # target that resolves to one of this host's own addresses.
+      MAIL_PROBE_TARGET: mail.blueprintdigital.my
+      MAIL_PROBE_PORTS: "25 465 993"
+    volumes:
+      # docker ps / inspect / exec: restart counts, and psql inside each Postgres container.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The directory, not the socket file: a tailscaled restart makes a new socket inode.
+      - /var/run/tailscale:/var/run/tailscale:ro
+      - textfile:/textfile
+    cpus: 0.1
+    mem_limit: 64m
+
 volumes:
   alloy_data:
     name: monitoring_alloy_data

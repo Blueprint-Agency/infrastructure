@@ -4,9 +4,10 @@ The one door through which a cross-cutting signal — the backup heartbeat, the 
 key-expiry check, anything later — enters monitoring. A new signal is a file written into a
 directory, never a new exporter, integration or alerting vendor (#22).
 
-> **Status: both halves in the repo (#24), bpvps2 only.** The backup job (#27) writes; Alloy's
-> textfile collector reads; `grafana/rules/textfile.yml` alerts. The end-to-end test below is
-> _pending the first deploy of the monitoring stack_. bpvps1 gets the same reader in #25.
+> **Status: both halves in the repo on bpvps1 and bpvps2 (#24, #25).** The backup job (#27, #28)
+> and the monitoring stack's own `probes` container write; Alloy's textfile collector reads;
+> `grafana/rules/textfile.yml` and `hosts.yml` alert. The end-to-end test below is _pending the
+> first deploy of the monitoring stack_.
 
 ## The contract
 
@@ -15,7 +16,7 @@ directory, never a new exporter, integration or alerting vendor (#22).
 | Where | the Docker volume **`monitoring_textfile`**, one per host. External to every stack; each stack that uses it — producers **and** the monitoring stack — creates it in its `ci/post-sync.sh` (`docker volume create` is idempotent), because either may deploy first |
 | Writers mount it at | `/textfile`, read-write |
 | The agent mounts it | `/textfile`, **read-only**, with `prometheus.exporter.unix`'s `textfile { directory = "/textfile" }`. `vps/shared/check-monitoring.py` fails CI if either is missing or the mount is writable |
-| One file per producer | `<producer>.prom` — `backup.prom`. Never write another producer's file |
+| One file per producer | `<producer>.prom` — `backup.prom`; each `probes` job is its own producer (`docker.prom`, `postgres.prom`, …). Never write another producer's file |
 | Format | Prometheus text exposition: `# HELP`, `# TYPE`, then `name{labels} value` |
 | Writes | **atomic**: write `<producer>.prom.tmp` in the same directory, then `mv` it over. The agent reads only `*.prom`, so it never sees half a file |
 | Time | Unix seconds, as a gauge named `*_timestamp_seconds` |
@@ -47,24 +48,38 @@ is health.
 
 ## Adding a producer
 
-All in one commit:
+**First ask whether it is a probe.** If the signal can be read with a `docker` command, a `curl`
+or a TCP dialog, add a job to the monitoring stack's `probes/bin/probe.sh` (its formatter in
+`probes/bin/lib.sh`, a case in `scripts/test_probes_lib.sh`, a crontab line) on **both** hosts —
+it then gets a heartbeat and `probes-stale-<host>` for free, and needs only steps 2, 4 and 5.
+
+Otherwise, all in one commit:
 
 1. The producer's stack mounts `monitoring_textfile` at `/textfile` and creates the volume in its
    `ci/post-sync.sh` (copy `vps/bpvps2/stacks/backup/ci/post-sync.sh`).
-2. Its metric names go in the host's `metrics.allowlist` — otherwise the agent drops them.
-3. A staleness rule in `grafana/rules/textfile.yml`, age **or** absent, with its host matcher.
+2. Its metric names go in **every** monitored host's `metrics.allowlist` (they are one file,
+   copied) — otherwise the agent drops them.
+3. A staleness rule per host in `grafana/rules/textfile.yml`, age **or** absent, with its host matcher.
 4. Its metric prefix goes in `FAMILY` in `vps/shared/check-monitoring.py`, so CI also catches a
    rule reading one of its metrics that the allowlist forgot.
 5. A row in the table below.
+
+**Never label a series `job` or `instance`.** The agent's scrape owns both and renames a file's
+own to `exported_job` — a join on it then fails at evaluation, not in CI (seen 2026-09-14).
 
 ## Producers
 
 | File | Written by | Metrics | Rule |
 |---|---|---|---|
-| `backup.prom` | `backup` stack, after each target's snapshot and prune succeed | `backup_last_success_timestamp_seconds{target}`, `backup_last_size_bytes{target}` — see [`backup-restore.md`](backup-restore.md) | `backup-stale-bpvps2` |
-| `canary.prom` | nobody, normally — the seam test below, by hand | `textfile_canary_timestamp_seconds` | `textfile-canary-stale-bpvps2` (inert while the file is absent) |
+| `backup.prom` | `backup` stack, after each target's snapshot and prune succeed | `backup_last_success_timestamp_seconds{target}`, `backup_last_size_bytes{target}` — see [`backup-restore.md`](backup-restore.md) | `backup-stale-<host>` |
+| `docker.prom` | `probes`, every minute | `docker_container_restarts_total{container}` | `container-restarting` |
+| `postgres.prom` | `probes`, every minute — every running Postgres container, queried inside it | `postgres_connections{container}`, `postgres_max_connections{container}` | `postgres-connections` |
+| `mail.prom` | `probes` on **bpvps2 only** (`MAIL_PROBE_TARGET`), every minute | `mail_port_consecutive_failures{target,port}` | `mail-port-down` |
+| `tailscale.prom` | `probes`, weekly (Mon 10:17 KL) and at container start | `tailscale_key_expiry_timestamp_seconds` (0 = cannot expire) | `tailscale-key-expiry` |
+| every `probes` file | the same job, beside its own metrics | `probes_last_success_timestamp_seconds{probe}`, `probes_max_age_seconds{probe}` | `probes-stale-<host>` |
+| `canary.prom` | nobody, normally — the seam test below, by hand | `textfile_canary_timestamp_seconds` | `textfile-canary-stale` (inert while the file is absent) |
 
-## Testing the seam (bpvps2)
+## Testing the seam (bpvps2; the same on bpvps1 with the alias swapped)
 
 This proves the seam itself, apart from any consumer. Nothing user-facing is touched, so it
 needs no announced window. Write through a throwaway container, since `deploy` cannot reach the
@@ -76,7 +91,7 @@ volume's host path:
 ssh bp-bpvps2 'docker run --rm -v monitoring_textfile:/t alpine sh -c \
   "printf \"textfile_canary_timestamp_seconds %s\n\" \$(date +%s) > /t/canary.prom.tmp && mv /t/canary.prom.tmp /t/canary.prom"'
 
-# 2. Leave it. After 5 min (+1 min pending) textfile-canary-stale-bpvps2 fires.
+# 2. Leave it. After 5 min (+1 min pending) textfile-canary-stale fires for host bpvps2.
 # 3. Re-run step 1. The alert resolves on the next evaluation.
 # 4. Clean up. The series ends, and the rule goes back to inert.
 ssh bp-bpvps2 'docker run --rm -v monitoring_textfile:/t alpine rm -f /t/canary.prom'

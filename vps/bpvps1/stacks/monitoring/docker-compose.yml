@@ -1,0 +1,90 @@
+# monitoring — Grafana Alloy on bpvps1: host + container metrics and container logs to Grafana
+# Cloud, plus the textfile probes. Same agent as bpvps2's: everything in this directory except
+# this file and ci/ is an identical copy, and CI (vps/shared/check-monitoring.py) fails if the
+# copies drift. Change both hosts in one commit.
+#
+# bpvps1's stalwart, traefik and wordpress stacks are root-owned and excluded from CI. This stack
+# does not live inside them: it is its own deploy-owned directory, and observes their containers
+# only through the Docker socket and the host's /proc, /sys and cgroup tree -- which do not care
+# who owns a stack directory. Proven on the host on 2026-09-14 before this was written: cadvisor
+# listed all eight containers, and the log tailer attached to every one of them (stalwart,
+# traefik, wordpress included) with no error. ci/post-sync.sh refuses a dir not owned by deploy.
+#
+# Runbook (alerts, budget, silencing, adding a host): docs/monitoring.md.
+services:
+  alloy:
+    build: .
+    image: blueprint-alloy:local
+    pull_policy: build
+    # Not keyed on ${ENV_NAME}: one agent per HOST, covering every instance on it.
+    container_name: alloy
+    restart: unless-stopped
+    # The host's network namespace: /proc/net is per namespace, so in a bridge network the
+    # node_network_* series would describe the container's own veth.
+    network_mode: host
+    command:
+      - run
+      # Host loopback only. Nothing is published.
+      - --server.http.listen-addr=127.0.0.1:12345
+      - --storage.path=/var/lib/alloy/data
+      - --disable-reporting
+      - /etc/alloy/config.alloy
+    environment:
+      TZ: Asia/Kuala_Lumpur
+      # The `host` label on every metric and log line; the rules match host="bpvps1". CI fails if
+      # this is not the host's key in vps/hosts.json.
+      MONITORING_HOST: bpvps1
+      # From ci/env.ci, rendered by CI from the bpvps1 GitHub Environment; a blank one fails the deploy.
+      GRAFANA_CLOUD_PROM_URL: ${GRAFANA_CLOUD_PROM_URL}
+      GRAFANA_CLOUD_PROM_USER: ${GRAFANA_CLOUD_PROM_USER}
+      GRAFANA_CLOUD_LOKI_URL: ${GRAFANA_CLOUD_LOKI_URL}
+      GRAFANA_CLOUD_LOKI_USER: ${GRAFANA_CLOUD_LOKI_USER}
+      GRAFANA_CLOUD_API_TOKEN: ${GRAFANA_CLOUD_API_TOKEN}
+    # cadvisor walks the host cgroup tree; with a private cgroup namespace it sees only its own.
+    cgroup: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      # Twice on purpose: node_exporter takes a sysfs path, cadvisor reads /sys/fs/cgroup only.
+      - /sys:/sys:ro
+      - /:/rootfs:ro,rslave
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /run/containerd/containerd.sock:/run/containerd/containerd.sock:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+      # Log read positions and the metrics WAL: a restart resumes rather than re-ships.
+      - alloy_data:/var/lib/alloy/data
+      # The textfile seam: backup.prom from the backup stack, and the probes below. Read-only.
+      - textfile:/textfile:ro
+    # 2 vCPU / 8 GB, shared with the mail platform. Ceilings, not the expected figure: a smoke run
+    # on 2026-09-14 used ~68 MiB and under 1% CPU.
+    cpus: 0.5
+    mem_limit: 384m
+
+  # The textfile probes: restart counts, Postgres connections (none on this host -- wp-db is
+  # MariaDB -- so only the heartbeat moves) and Tailscale key expiry. NO mail probe: this IS the
+  # mail host, and probe.sh would refuse anyway -- bpvps2 probes bpvps1's mail ports.
+  probes:
+    build: ./probes
+    image: blueprint-probes:local
+    pull_policy: build
+    container_name: probes
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      TZ: Asia/Kuala_Lumpur
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The directory, not the socket file: a tailscaled restart makes a new socket inode.
+      - /var/run/tailscale:/var/run/tailscale:ro
+      - textfile:/textfile
+    cpus: 0.1
+    mem_limit: 64m
+
+volumes:
+  alloy_data:
+    name: monitoring_alloy_data
+  # Shared with the backup stack, so it belongs to neither: each creates it in ci/post-sync.sh.
+  textfile:
+    external: true
+    name: monitoring_textfile

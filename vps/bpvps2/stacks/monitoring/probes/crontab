@@ -1,0 +1,8 @@
+# Textfile probes (#25). Times are Asia/Kuala_Lumpur (TZ from the container environment).
+# Output goes to PID 1's stdout/stderr, so it shows in `docker logs probes` -- and ships to Loki.
+# busybox crond: a `#` ANYWHERE on a line starts a comment, and it silently skips a crontab not
+# owned by root -- COPY it in, never bind-mount it. Identical on every host; CI checks.
+* * * * * . /run/job.env && /app/bin/probe.sh docker >/proc/1/fd/1 2>/proc/1/fd/2
+* * * * * . /run/job.env && /app/bin/probe.sh postgres >/proc/1/fd/1 2>/proc/1/fd/2
+* * * * * . /run/job.env && /app/bin/probe.sh mail >/proc/1/fd/1 2>/proc/1/fd/2
+17 10 * * 1 . /run/job.env && /app/bin/probe.sh tailscale >/proc/1/fd/1 2>/proc/1/fd/2

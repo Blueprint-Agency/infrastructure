@@ -1,13 +1,16 @@
 [
   { "key": "vps1-staging", "dir": "vps/vps1-staging", "env_name": "dev",
-    "_comment": "no_backups: set to a REASON to declare a host out of scope for backups. The host then must NOT carry stacks/backup/targets.yml, and check-backup-targets.py skips its volume checks and names it in every run's output, so the gap stays visible instead of going quiet.",
+    "_comment": "no_backups: set to a REASON to declare a host out of scope for backups. The host then must NOT carry stacks/backup/targets.yml, and check-backup-targets.py skips its volume checks and names it in every run's output, so the gap stays visible instead of going quiet. no_monitoring: the same, for monitoring (#25) -- the host must NOT carry stacks/monitoring/, check-monitoring.py names it in every run's output, and every host WITHOUT it must have a monitoring stack.",
     "no_backups": "Teeko host, out of scope for backups and monitoring (#4, #22). No Hostinger API token for this account, not in the Blueprint commercial context. Leaves staging n8n (workflows + encryption key) and teeko-website's database unprotected.",
+    "no_monitoring": "Teeko host, out of scope for monitoring (#22). No agent and no alerts: staging n8n, teeko-website or drizzle-gateway can stop, the disk can fill, or Tailscale can drop, and nobody is told.",
     "exclude": "website", "app_stacks": "" },
   { "key": "vps2-prod",    "dir": "vps/vps2-prod",    "env_name": "prod",
     "no_backups": "Teeko host, out of scope for backups and monitoring (#4, #22). Leaves teeko-website's production database unprotected.",
+    "no_monitoring": "Teeko host, out of scope for monitoring (#22). No agent and no alerts: teeko.ai production (teeko-website) can stop, fill its disk or drop off Tailscale, and nobody is told.",
     "exclude": "website", "app_stacks": "" },
   { "key": "vps3-prod",    "dir": "vps/vps3-prod",    "env_name": "prod",
     "no_backups": "Teeko host, out of scope for backups and monitoring (#4, #22). Leaves ehailing production Postgres, the WABA database, and n8n's database + encryption key unprotected.",
+    "no_monitoring": "Teeko host, out of scope for monitoring (#22). No agent and no alerts: ehailing's backend and production Postgres, n8n, the WABA database and the ga4/gsc MCP stacks can stop, and nobody is told.",
     "exclude": "",  "app_stacks": "ehailing" },
 
   { "key": "bpvps1", "dir": "vps/bpvps1", "env_name": "prod",

@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Check that what monitoring collects, shows and alerts on still agree with each other.
 
-For every host in vps/hosts.json that has a stacks/monitoring/ directory:
+For every host in vps/hosts.json:
+
+  0. It has a stacks/monitoring/ directory, unless it declares `no_monitoring: <reason>` -- and
+     then it must NOT have one. Exempt hosts are printed on every run, clean or not, so "all
+     clear" never reads as "every host is watched" (#25). The three Teeko hosts are exempt.
+
+For every monitored host:
 
   1. Every metric in its metrics.allowlist is read by at least one dashboard panel or alert
      rule under grafana/. A metric nothing reads is series budget spent on nothing (#22).
@@ -13,6 +19,14 @@ For every host in vps/hosts.json that has a stacks/monitoring/ directory:
      exempt (an agent cannot report its own absence) -- and every one of its selectors
      carries host="<host>". A container nobody declared dies silently; a selector without
      the host matcher names an instance on the wrong machine.
+  4. The other rules that watch for silence exist for it too -- probes-stale-<host>, and
+     backup-stale-<host> where it runs the backup job -- every agent-collected metric in them
+     pinned to host="<host>". absent_over_time without the host is satisfied by another host.
+
+Across monitored hosts:
+
+  5. The stack is one implementation: every file except the compose file and ci/ is identical
+     on every host. CI rsyncs only a stack's own dir, so a fix in one copy is a bug in the other.
 
 Container names are resolved the way check-backup-targets.py resolves them: container_name
 with ${ENV_NAME} per fanout destination, else <project>-<service>-1.
@@ -37,7 +51,7 @@ METRIC = re.compile(r"^[A-Za-z_:][A-Za-z0-9_:]*$")
 # After the exporters' own families come the textfile producers' prefixes -- a new producer
 # adds its prefix here (docs/textfile-metrics.md). probe_* / sm_* are NOT the agent's: Grafana's
 # synthetic probes write them straight to Grafana Cloud.
-FAMILY = re.compile(r"^(node|container|machine|backup|textfile)_")
+FAMILY = re.compile(r"^(node|container|machine|backup|textfile|probes|docker|postgres|tailscale|mail)_")
 TEXTFILE_VOLUME, TEXTFILE_DIR = "monitoring_textfile", "/textfile"
 CONTAINER = re.compile(r'container="([^"]+)"')
 
@@ -129,22 +143,64 @@ def check_textfile(key, stack, doc, problems):
                         f"\"{TEXTFILE_DIR}\" in prometheus.exporter.unix")
 
 
+def host_selectors(key, uid, queries_, problems):
+    """Every selector in a per-host rule must carry host="<key>". -> the rule's joined PromQL."""
+    expr = "\n".join(queries_)
+    for m in re.finditer(r"([A-Za-z_:][A-Za-z0-9_:]*)\s*(\{[^}]*\})?", expr):
+        name, sel = m.group(1), m.group(2) or ""
+        if FAMILY.match(name) and f'host="{key}"' not in sel:
+            problems.append(f'{key}: {uid}: {name}{sel} has no host="{key}" matcher -- '
+                            "it would match that series on any host")
+    return expr
+
+
+def agent_files(stack):
+    """-> {relative path: bytes} for the parts of the agent every host must share: everything
+    in the stack except its compose file (which names the host) and ci/."""
+    return {p.relative_to(stack).as_posix(): p.read_bytes() for p in sorted(stack.rglob("*"))
+            if p.is_file() and p.name not in COMPOSE_FILES and "ci" not in p.relative_to(stack).parts[:1]}
+
+
+def check_drift(hosts, problems):
+    copies = {h["key"]: agent_files(pathlib.Path(h["dir"]) / "stacks" / "monitoring") for h in hosts
+              if not h.get("no_monitoring") and (pathlib.Path(h["dir"]) / "stacks" / "monitoring").is_dir()}
+    for path in sorted({p for files in copies.values() for p in files}):
+        variants = {}
+        for key, files in copies.items():
+            variants.setdefault(files.get(path), []).append(key)
+        if len(variants) > 1:
+            where = "; ".join(f"{'missing' if body is None else 'one copy'} on {', '.join(keys)}"
+                              for body, keys in variants.items())
+            problems.append(f"monitoring drift: stacks/monitoring/{path} differs between hosts ({where}) "
+                            "-- the agent is one implementation, copy the change to every host")
+
+
 def check_host(host, by_file, by_rule, problems):
     key = host["key"]
     stack = pathlib.Path(host["dir"]) / "stacks" / "monitoring"
+    if "no_monitoring" in host:
+        if not str(host["no_monitoring"]).strip():
+            problems.append(f"{key}: no_monitoring needs a reason -- say what goes unwatched")
+        if stack.is_dir():
+            problems.append(f"{key}: declared no_monitoring but {stack.as_posix()} exists -- "
+                            "delete it, or drop no_monitoring")
+        return
     if not stack.is_dir():
+        problems.append(f"{key}: no monitoring stack at {stack.as_posix()} -- every host is monitored "
+                        "unless vps/hosts.json declares no_monitoring: <reason>")
         return
     # The `host` label on every metric and log line is MONITORING_HOST, and every rule matches
     # host="<key>". Were they to differ, each absent_over_time would match nothing and the
     # down rule would fire for every container, forever.
     compose = [stack / f for f in COMPOSE_FILES if (stack / f).is_file()]
     doc = yaml.safe_load(compose[0].read_text(encoding="utf-8")) or {} if compose else {}
-    labels = {str((svc or {}).get("environment", {}).get("MONITORING_HOST"))
+    # Only the agent sets it; the probes service beside it has no label of its own to stamp.
+    labels = {str(svc["environment"]["MONITORING_HOST"])
               for svc in (doc.get("services") or {}).values()
-              if isinstance((svc or {}).get("environment"), dict)}
+              if isinstance((svc or {}).get("environment"), dict) and "MONITORING_HOST" in svc["environment"]}
     if labels != {key}:
         problems.append(f"{key}: {stack.as_posix()}: the agent must set MONITORING_HOST: {key} "
-                        f"(found {sorted(labels - {'None'}) or 'none'}) -- rules match host=\"{key}\"")
+                        f"(found {sorted(labels) or 'none'}) -- rules match host=\"{key}\"")
     check_textfile(key, stack, doc, problems)
     path = stack / "metrics.allowlist"
     if not path.is_file():
@@ -174,18 +230,25 @@ def check_host(host, by_file, by_rule, problems):
             problems.append(f"{key}: {source} reads {metric}, which is not in {path.as_posix()} "
                             "-- the agent drops it before it leaves the host")
 
+    # Silence can only be noticed by a rule that names the host: absent_over_time without a host
+    # matcher is satisfied by the OTHER host's series. So these are written once per host.
+    wanted = ["probes-stale"] + (["backup-stale"] if any(
+        (pathlib.Path(host["dir"]) / "stacks" / "backup" / f).is_file() for f in COMPOSE_FILES) else [])
+    for prefix in wanted:
+        uid = f"{prefix}-{key}"
+        if uid not in by_rule:
+            problems.append(f"{key}: no alert rule with uid {uid} under grafana/rules/ -- "
+                            "a monitored host carries its own staleness rules")
+        else:
+            host_selectors(key, uid, by_rule[uid], problems)
+
     uid = f"container-down-{key}"
     if uid not in by_rule:
         problems.append(f"{key}: no alert rule with uid {uid} under grafana/rules/ -- "
                         "every monitored host declares its containers")
         return
-    expr = "\n".join(by_rule[uid])
+    expr = host_selectors(key, uid, by_rule[uid], problems)
     declared = set(CONTAINER.findall(expr))
-    selectors = re.findall(r"\{[^}]*\}", expr)
-    for sel in selectors:
-        if f'host="{key}"' not in sel:
-            problems.append(f'{key}: {uid}: selector {sel} has no host="{key}" matcher -- '
-                            "it would match a container of that name on any host")
     expected = compose_containers(host, problems)
     for c in sorted(set(expected) - declared):
         problems.append(f"{key}: {uid}: container {c!r} (stack {expected[c]}) is not declared "
@@ -198,10 +261,18 @@ def main():
     os.chdir(pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve())
     problems = []
     by_file, by_rule = load_grafana()
-    for host in json.loads(pathlib.Path("vps/hosts.json").read_text(encoding="utf-8")):
+    hosts = json.loads(pathlib.Path("vps/hosts.json").read_text(encoding="utf-8"))
+    for host in hosts:
         check_host(host, by_file, by_rule, problems)
+    check_drift(hosts, problems)
     for p in problems:
         print(p)
+    # Printed whatever the verdict: "all clear" must never read as "every host is watched".
+    exempt = [h for h in hosts if h.get("no_monitoring")]
+    if exempt:
+        print(f"out of scope for monitoring ({len(exempt)} host(s)) -- NOT monitored:")
+        for h in exempt:
+            print(f"  {h['key']}: {h['no_monitoring']}")
     if problems:
         print(f"{len(problems)} monitoring problem(s)")
         return 1

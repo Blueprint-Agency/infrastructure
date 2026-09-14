@@ -112,15 +112,40 @@ def down(host, containers):
     """
 
 
+def heartbeat(uid, *exprs):
+    """A rule group holding one rule per (uid, expr) -- for the per-host staleness rules."""
+    rules = "".join(f"""
+              - uid: {u}
+                title: {u}
+                condition: C
+                data:
+                  - refId: A
+                    datasourceUid: grafanacloud-prom
+                    model:
+                      expr: {json.dumps(e)}""" for u, e in zip(uid, exprs))
+    return f"""
+        apiVersion: 1
+        groups:
+          - name: heartbeats
+            folder: Monitoring
+            interval: 1m
+            rules:{rules}
+    """
+
+
+PROBES_STALE = 'absent_over_time(probes_last_success_timestamp_seconds{host="h1"}[15m])'
+
+
 def base(**over):
     files = {
         "vps/h1/stacks/app/docker-compose.yml": APP,
         "vps/h1/stacks/proxy/docker-compose.yml": PROXY,
         "vps/h1/stacks/monitoring/docker-compose.yml": MONITORING,
-        "vps/h1/stacks/monitoring/metrics.allowlist": ALLOWLIST,
+        "vps/h1/stacks/monitoring/metrics.allowlist": ALLOWLIST + "probes_last_success_timestamp_seconds\n",
         "vps/h1/stacks/monitoring/config.alloy": CONFIG,
         "grafana/dashboards/hosts.json": dashboard('sum by (host) (rate(node_cpu_seconds_total{mode!="idle"}[5m]))'),
         "grafana/rules/containers.yml": down("h1", ["app-web-staging", "app-web-prod", "proxy"]),
+        "grafana/rules/heartbeats.yml": heartbeat(["probes-stale-h1"], PROBES_STALE),
     }
     files.update(over)
     return repo(H1, {k: v for k, v in files.items() if v is not None})
@@ -130,9 +155,28 @@ def base(**over):
 # rule declares exactly the compose containers -- fanout resolved, the agent itself exempt.
 expect("clean", base(), 0)
 
-# A host without a monitoring stack is not checked here -- rolling out is #25's job.
-expect("no monitoring stack", repo([{"key": "h2", "dir": "vps/h2", "env_name": "prod"}],
-                                   {"vps/h2/stacks/proxy/docker-compose.yml": PROXY}), 0)
+# Every host is in scope unless hosts.json says why not (#25). A host with no agent is a host
+# whose containers die silently -- so its absence is a failure, not a quiet skip.
+expect("in-scope host without a monitoring stack",
+       repo([{"key": "h2", "dir": "vps/h2", "env_name": "prod"}],
+            {"vps/h2/stacks/proxy/docker-compose.yml": PROXY}),
+       1, "h2", "no monitoring stack", "no_monitoring")
+# The exemption is a decision, so it carries its reason, and every run prints it -- clean or not.
+expect("exempt host",
+       repo([{"key": "h2", "dir": "vps/h2", "env_name": "prod", "no_monitoring": "Teeko host, out of scope (#22)"}],
+            {"vps/h2/stacks/proxy/docker-compose.yml": PROXY}),
+       0, "NOT monitored", "h2: Teeko host, out of scope (#22)")
+expect("exemption without a reason",
+       repo([{"key": "h2", "dir": "vps/h2", "env_name": "prod", "no_monitoring": " "}],
+            {"vps/h2/stacks/proxy/docker-compose.yml": PROXY}),
+       1, "no_monitoring needs a reason")
+# Exempt AND carrying an agent: the scope decision and the repo disagree, one of them is wrong.
+exempt_with_stack = base()
+hosts = json.loads((exempt_with_stack / "vps/hosts.json").read_text(encoding="utf-8"))
+hosts[0]["no_monitoring"] = "out of scope"
+(exempt_with_stack / "vps/hosts.json").write_text(json.dumps(hosts), encoding="utf-8")
+expect("exempt host that still has a monitoring stack", exempt_with_stack, 1,
+       "declared no_monitoring", "stacks/monitoring")
 
 # Alloy joins the allowlist's lines with | into one regex, so every line must be a bare
 # metric name: a comment would become an alternative, and a ( or . in it changes the regex.
@@ -218,6 +262,62 @@ expect("textfile metric read but not allowlisted",
                dashboard("node_cpu_seconds_total", "container_last_seen",
                          "time() - backup_last_success_timestamp_seconds")}),
        1, "backup_last_success_timestamp_seconds", "not in")
+
+# The rules that watch for SILENCE cannot be written once for all hosts: absent_over_time has
+# to name the host, or a host whose agent never started matches nothing and fires nothing.
+# So each monitored host must carry its own -- probes-stale always, backup-stale when the host
+# runs a backup job -- each selector pinned to that host.
+expect("no probes-stale rule for a monitored host",
+       base(**{"grafana/rules/heartbeats.yml": heartbeat(["probes-stale-other"],
+                                                         PROBES_STALE.replace("h1", "other"))}),
+       1, "probes-stale-h1")
+expect("probes-stale selector without host matcher",
+       base(**{"grafana/rules/heartbeats.yml": heartbeat(["probes-stale-h1"],
+                                                         "absent_over_time(probes_last_success_timestamp_seconds[15m])")}),
+       1, "probes-stale-h1", 'host="h1"')
+BACKUP_STALE = 'absent_over_time(backup_last_success_timestamp_seconds{host="h1"}[15m])'
+with_backup = {"vps/h1/stacks/backup/docker-compose.yml": "services:\n  backup:\n    image: b\n    container_name: backup\n",
+               "vps/h1/stacks/monitoring/metrics.allowlist": ALLOWLIST + "probes_last_success_timestamp_seconds\n"
+                                                             "backup_last_success_timestamp_seconds\n",
+               "grafana/rules/containers.yml": down("h1", ["app-web-staging", "app-web-prod", "proxy", "backup"])}
+expect("backup job but no backup-stale rule", base(**with_backup), 1, "backup-stale-h1")
+expect("backup job with its backup-stale rule",
+       base(**with_backup, **{"grafana/rules/heartbeats.yml": heartbeat(["probes-stale-h1", "backup-stale-h1"],
+                                                                        PROBES_STALE, BACKUP_STALE)}), 0)
+
+# The agent is one implementation. CI rsyncs only a stack's own directory, so every host carries
+# a copy -- and a fix that reached one copy leaves the other host running the bug. Only the
+# compose file (which names the host) and ci/ may differ.
+H12 = [{"key": "h1", "dir": "vps/h1", "env_name": "prod"}, {"key": "h2", "dir": "vps/h2", "env_name": "prod"}]
+
+
+def two_hosts(**over):
+    files = {"grafana/dashboards/hosts.json": dashboard('rate(node_cpu_seconds_total[5m])', "container_last_seen",
+                                                        "probes_last_success_timestamp_seconds")}
+    for h in ("h1", "h2"):
+        files.update({
+            f"vps/{h}/stacks/proxy/docker-compose.yml": PROXY,
+            f"vps/{h}/stacks/monitoring/docker-compose.yml": MONITORING.replace("MONITORING_HOST: h1", f"MONITORING_HOST: {h}"),
+            f"vps/{h}/stacks/monitoring/metrics.allowlist": ALLOWLIST + "probes_last_success_timestamp_seconds\n",
+            f"vps/{h}/stacks/monitoring/config.alloy": CONFIG,
+            f"vps/{h}/stacks/monitoring/Dockerfile": "FROM grafana/alloy:v1\n",
+            f"vps/{h}/stacks/monitoring/probes/bin/lib.sh": "echo probe\n",
+            f"grafana/rules/containers-{h}.yml": down(h, ["proxy"]).replace("name: containers", f"name: containers-{h}"),
+            f"grafana/rules/heartbeats-{h}.yml": heartbeat([f"probes-stale-{h}"], PROBES_STALE.replace("h1", h))
+                                                 .replace("name: heartbeats", f"name: heartbeats-{h}"),
+        })
+    files.update(over)
+    return repo(H12, files)
+
+
+# The two compose files differ (MONITORING_HOST) -- that is allowed.
+expect("two identical agents", two_hosts(), 0)
+expect("agent config drifted between hosts",
+       two_hosts(**{"vps/h2/stacks/monitoring/config.alloy": CONFIG + "// hotfix\n"}),
+       1, "monitoring drift", "config.alloy")
+missing = two_hosts()
+(missing / "vps/h2/stacks/monitoring/probes/bin/lib.sh").unlink()
+expect("probe script missing on one host", missing, 1, "monitoring drift", "probes/bin/lib.sh", "missing on h2")
 
 expect("this repository", REPO, 0)
 

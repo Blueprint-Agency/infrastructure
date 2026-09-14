@@ -32,6 +32,7 @@ on:
       - 'grafana/**'
       - 'scripts/grafana-apply.py'
       - 'scripts/test_grafana_apply.py'
+      - 'scripts/test_probes_lib.sh'
 
 jobs:
   # ── Monitoring agrees with itself — runs on every push, host selected or not ─
@@ -48,6 +49,7 @@ jobs:
         run: |
           python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
           python3 vps/shared/test_check_monitoring.py
+          bash scripts/test_probes_lib.sh
           python3 vps/shared/test_public_endpoints.py
           python3 scripts/test_grafana_apply.py
           bash vps/shared/validate-alloy.sh
