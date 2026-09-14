@@ -1,0 +1,75 @@
+# Where alerts go, and what they look like when they arrive.
+#
+# Applied by scripts/grafana-apply.py like the dashboards and rules next door: this file is
+# the copy of record. Editing a contact point or the policy tree in the web UI works until
+# the next apply overwrites it.
+#
+# ${VAR} is substituted from the environment at apply time and must be set -- an unset one
+# fails the run, the same rule as render-ci.py. This repository is PUBLIC: a Discord webhook
+# URL is a credential (anyone holding it can post to the channel), so it lives in .env and
+# never here.
+#
+# One alerting path, by decision (#22): no second alerting vendor, no Telegram/ntfy/Pushover.
+# Discord is a Grafana-native contact point, so Grafana still owns routing, grouping and
+# silences -- Discord is only delivery, the same as email.
+#
+# ⚠️ Discord will not reliably wake anyone at 2am: phone Do Not Disturb silences it. Set that
+# server to "All Messages" and add it to the DND exceptions, or accept that overnight
+# criticals are seen in the morning. That trade was made knowingly; email is not configured
+# yet, and when it is, `critical` should gain an email integration beside the Discord one.
+
+contact_points:
+  - name: discord
+    type: discord
+    settings:
+      url: ${DISCORD_WEBHOOK_URL}
+
+      # Default Discord formatting dumps every label and annotation of every instance. Ten
+      # containers on a host then produce a wall nobody reads on a phone -- which is the only
+      # screen that matters at 3am. So: one line per alert, and the description once.
+      #
+      # The count in the title is the diagnosis. "Container down on bpvps1 (11)" is not eleven
+      # failures; it is the agent or the host being gone. grafana/rules/containers.yml says so
+      # in the description, but the title is what is visible on a lock screen.
+      title: >-
+        {{ if eq .Status "firing" }}🔴{{ else }}🟢{{ end }} {{ .CommonLabels.alertname }}{{ if
+        gt (len .Alerts) 1 }} ({{ len .Alerts }}){{ end }}
+
+      # Labels are omitted on purpose: every summary already names its container and host.
+      message: |-
+        {{ range .Alerts -}}
+        {{ if eq .Status "firing" }}🔴{{ else }}🟢{{ end }} {{ .Annotations.summary }}
+        {{ end }}
+        {{- if eq .Status "firing" }}
+        {{ with .CommonAnnotations.description }}> {{ . }}
+        {{ end }}
+        [Open]({{ .ExternalURL }}/alerting/list) · [Silence]({{ (index .Alerts 0).SilenceURL }})
+        {{- end }}
+
+# The routing tree. `group_by` includes `host` so a bpvps1 problem and a bpvps2 problem never
+# arrive as one message: they are two incidents and usually two causes.
+policy:
+  receiver: discord
+  group_by: [grafana_folder, alertname, host]
+  routes:
+    # 10s, not the 30s default. grafana/rules/endpoints.yml is timed around it, and #24's
+    # acceptance test is "Traefik stopped -> alert on a phone within five minutes".
+    - receiver: discord
+      matchers: [[severity, "=", critical]]
+      group_wait: 10s
+      group_interval: 5m
+      repeat_interval: 1h
+
+    - receiver: discord
+      matchers: [[severity, "=", warning]]
+      group_wait: 1m
+      group_interval: 10m
+      repeat_interval: 12h
+
+    # info is the textfile canary, which is MEANT to fire during the seam test. It must never
+    # be urgent: slow first send, and a day between repeats.
+    - receiver: discord
+      matchers: [[severity, "=", info]]
+      group_wait: 5m
+      group_interval: 30m
+      repeat_interval: 24h

@@ -3,7 +3,8 @@
 
 Apply the repository's Grafana objects to Grafana Cloud: every dashboard under
 grafana/dashboards/, every alert rule group under grafana/rules/, and one Synthetic Monitoring
-check per public endpoint derived by vps/shared/public-endpoints.py (#24). The files are the
+check per public endpoint derived by vps/shared/public-endpoints.py (#24), plus the contact
+points and notification policy in grafana/alerting/notifications.yml. The files are the
 copy of record (#22) -- a dashboard or rule that exists only in the web UI has no history and no
 review, and anything edited there is overwritten by the next apply.
 
@@ -22,6 +23,16 @@ made by hand is never touched.
 Rule groups go through the provisioning API, which marks them as provisioned: the UI shows
 them read-only. That is deliberate. To change a rule, change the file.
 
+Contact points and the policy are sent with X-Disable-Provenance, so they stay editable in
+the UI. Also deliberate, and the opposite trade: mid-incident someone may need to add a
+destination or route around a broken one, and waiting on a deploy to do it is worse than the
+drift. The next apply puts the file's version back.
+
+Any ${VAR} in notifications.yml is substituted from the environment and must be set -- a
+contact point with a blank webhook is accepted by Grafana and then delivers nothing. The
+Discord webhook URL is a credential and this repository is public, so it lives in .env as
+DISCORD_WEBHOOK_URL. --dry-run never resolves it, so it cannot be printed by accident.
+
 Tested by scripts/test_grafana_apply.py (the translation; no request is made).
 """
 import importlib.util
@@ -35,6 +46,8 @@ import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 UNITS = {"s": 1, "m": 60, "h": 3600}
+ENV_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+NOTIFICATIONS = "grafana/alerting/notifications.yml"
 # Every dashboard is saved into this folder -- the same one the alert rules name.
 DASHBOARD_FOLDER = "Monitoring"
 # Synthetic checks. Every minute from each probe: grafana/rules/endpoints.yml's window assumes it.
@@ -140,6 +153,46 @@ def load_endpoints():
     return checks, names
 
 
+def substitute(value, where):
+    """Replace ${VAR} from the environment. An unset one is fatal, like render-ci.py:
+    a contact point with a blank webhook is accepted by Grafana and then silently
+    delivers nothing, which is the failure this whole spec exists to prevent."""
+    def sub(m):
+        got = os.environ.get(m.group(1))
+        if not got:
+            sys.exit(f"{where}: ${{{m.group(1)}}} is not set -- `set -a; . ./.env; set +a` first")
+        return got
+    return ENV_VAR.sub(sub, value) if isinstance(value, str) else value
+
+
+def notifications(doc, resolve=True):
+    """notifications.yml -> (contact points, policy tree). resolve=False leaves ${VAR}
+    unexpanded so --dry-run can print the plan without reading, or printing, a secret."""
+    points = []
+    for cp in doc.get("contact_points") or []:
+        where = f"grafana/alerting/notifications.yml: contact point {cp.get('name')}"
+        settings = {k: (substitute(v, where) if resolve else v)
+                    for k, v in (cp.get("settings") or {}).items()}
+        points.append({"name": cp["name"], "type": cp["type"], "settings": settings,
+                       "disableResolveMessage": bool(cp.get("disable_resolve_message"))})
+
+    def route(r):
+        out = {"receiver": r["receiver"],
+               "object_matchers": [list(m) for m in r.get("matchers") or []]}
+        for k in ("group_wait", "group_interval", "repeat_interval"):
+            if r.get(k):
+                out[k] = r[k]
+        if r.get("routes"):
+            out["routes"] = [route(x) for x in r["routes"]]
+        return out
+
+    pol = doc.get("policy") or {}
+    tree = {"receiver": pol["receiver"], "group_by": pol.get("group_by") or []}
+    if pol.get("routes"):
+        tree["routes"] = [route(r) for r in pol["routes"]]
+    return points, tree
+
+
 def dashboard(doc, folder):
     """dashboard JSON -> POST /api/dashboards/db body"""
     return {"dashboard": {**doc, "id": None}, "folderUid": folder, "overwrite": True,
@@ -150,12 +203,17 @@ class Grafana:
     def __init__(self, url, token):
         self.url, self.token = url.rstrip("/"), token
 
-    def call(self, method, path, body=None, ok404=False):
+    def call(self, method, path, body=None, ok404=False, provenance=True):
+        headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json",
+                   "Accept": "application/json", "User-Agent": "blueprint-grafana-apply"}
+        if not provenance:
+            # Without this the object is marked provisioned and the UI refuses to edit it.
+            # Rule groups SHOULD be locked; contact points and the policy should not, so that
+            # someone can add a silence or a destination mid-incident without a deploy.
+            headers["X-Disable-Provenance"] = "true"
         req = urllib.request.Request(
             self.url + path, method=method,
-            data=None if body is None else json.dumps(body).encode(),
-            headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json",
-                     "Accept": "application/json", "User-Agent": "blueprint-grafana-apply"})
+            data=None if body is None else json.dumps(body).encode(), headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 return json.loads(resp.read() or b"null")
@@ -176,6 +234,7 @@ def main():
               for g in load_yaml(p).get("groups") or []]
     dashboards = [load_json(p) for p in sorted((ROOT / "grafana" / "dashboards").glob("*.json"))]
     endpoints, probe_names = load_endpoints()
+    notif = load_yaml(ROOT / NOTIFICATIONS)
     if dry:
         for g in groups:
             print(json.dumps(rule_group(g), indent=2))
@@ -183,6 +242,12 @@ def main():
             print(f"dashboard {d['uid']}: {len(d.get('panels') or [])} panels -> {folder_uid(DASHBOARD_FOLDER)}")
         for e in endpoints:
             print(f"synthetic check {e['hostname']}: {e['url']} (host {e['host']}) from {', '.join(probe_names)}")
+        # resolve=False: never print a webhook URL, which is a credential.
+        points, tree = notifications(notif, resolve=False)
+        for p in points:
+            print(f"contact point {p['name']}: {p['type']}")
+        print(f"notification policy: default -> {tree['receiver']}, "
+              f"{len(tree.get('routes') or [])} route(s), group_by {tree['group_by']}")
         return 0
 
     missing = [v for v in ("GRAFANA_URL", "GRAFANA_SA_TOKEN", "GRAFANA_SM_URL", "GRAFANA_SM_TOKEN")
@@ -208,6 +273,23 @@ def main():
     for d in dashboards:
         api.call("POST", "/api/dashboards/db", dashboard(d, folder_uid(DASHBOARD_FOLDER)))
         print(f"dashboard {d['uid']}: applied")
+    # Contact points and the policy before the checks: a check that starts failing should
+    # already have somewhere to report it. X-Disable-Provenance keeps them editable in the
+    # UI for an emergency silence -- unlike the rule groups, which are deliberately locked.
+    points, tree = notifications(notif)
+    existing = {c["name"]: c for c in api.call("GET", "/api/v1/provisioning/contact-points") or []}
+    for p in points:
+        if p["name"] in existing:
+            api.call("PUT", f"/api/v1/provisioning/contact-points/{existing[p['name']]['uid']}",
+                     {**p, "uid": existing[p["name"]]["uid"]}, provenance=False)
+            print(f"contact point {p['name']}: updated")
+        else:
+            api.call("POST", "/api/v1/provisioning/contact-points", p, provenance=False)
+            print(f"contact point {p['name']}: created")
+    api.call("PUT", "/api/v1/provisioning/policies", tree, provenance=False)
+    print(f"notification policy: default -> {tree['receiver']}, "
+          f"{len(tree.get('routes') or [])} route(s)")
+
     add, update, delete = sm_plan(endpoints, probes, sm.call("GET", "/check/list") or [])
     for body in add:
         sm.call("POST", "/check/add", body)

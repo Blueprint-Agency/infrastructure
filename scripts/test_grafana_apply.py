@@ -100,6 +100,46 @@ assert [(b["id"], b["tenantId"], b["target"]) for b in update] == [(1, 42, "http
 # Only a managed check with no endpoint is deleted; the hand-made one is left alone.
 assert [c["id"] for c in delete] == [2]
 
+# Notifications. The cases that matter are the two that fail closed: an unset ${VAR}, and
+# --dry-run never resolving one. A contact point with a blank webhook is accepted by Grafana
+# and then silently delivers nothing, which is the failure the whole spec exists to prevent.
+import os
+
+DOC = {"contact_points": [{"name": "discord", "type": "discord",
+                           "settings": {"url": "${TEST_HOOK}", "title": "x"}}],
+       "policy": {"receiver": "discord", "group_by": ["alertname", "host"],
+                  "routes": [{"receiver": "discord", "matchers": [["severity", "=", "critical"]],
+                              "group_wait": "10s", "repeat_interval": "1h"}]}}
+
+os.environ["TEST_HOOK"] = "https://example.invalid/hook"
+points, tree = ga.notifications(DOC)
+assert points[0]["settings"]["url"] == "https://example.invalid/hook"
+assert points[0]["disableResolveMessage"] is False
+# matchers -> object_matchers, and only the intervals that were set are sent.
+assert tree["routes"][0]["object_matchers"] == [["severity", "=", "critical"]]
+assert tree["routes"][0]["group_wait"] == "10s"
+assert "group_interval" not in tree["routes"][0]
+
+# --dry-run must not resolve: the plan is printed, and a webhook URL is a credential.
+unresolved, _ = ga.notifications(DOC, resolve=False)
+assert unresolved[0]["settings"]["url"] == "${TEST_HOOK}"
+
+del os.environ["TEST_HOOK"]
+try:
+    ga.notifications(DOC)
+except SystemExit as exc:
+    assert "TEST_HOOK" in str(exc), exc
+else:
+    raise AssertionError("an unset ${VAR} must fail the run, not send a blank webhook")
+
+# The repository's own notifications file translates, and names a receiver that exists.
+doc = ga.load_yaml(HERE.parent / ga.NOTIFICATIONS)
+names = {cp["name"] for cp in doc["contact_points"]}
+_, real = ga.notifications(doc, resolve=False)
+assert real["receiver"] in names, f"default route names an unknown receiver: {real['receiver']}"
+for r in real.get("routes") or []:
+    assert r["receiver"] in names, f"route names an unknown receiver: {r['receiver']}"
+
 # The repository's own files translate.
 for path in sorted((HERE.parent / "grafana" / "rules").glob("*.yml")):
     for g in ga.load_yaml(path)["groups"]:
