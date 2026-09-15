@@ -54,9 +54,15 @@ every run. Nothing on vps1-staging, vps2-prod or vps3-prod is watched.
 
 ## Budget
 
-#25 asks for this measured after a week of real data from both hosts. That week has not started
-(nothing is deployed). What is recorded now is **measured at the source**, on the hosts, on
-2026-09-14 — so the in-Grafana figure has something to be checked against.
+#25 asked for this measured after a week of real data. **Measured in Grafana Cloud on
+2026-09-15, after one day** — not seven. Recorded anyway, because the number settles almost
+immediately: active series is a function of how many containers and metric families are
+collected, not of elapsed time, and at **16% of the ceiling** a further six days cannot change
+the conclusion. Re-read it if a stack is added.
+
+> ⚠️ Read on a **trial** (ends 2026-09-27), so the *limits* in force today are Pro, not free.
+> The usage figures below are real; the ceiling they are measured against is the free-tier one
+> the `series-budget` rule assumes, which is the right thing to plan for.
 
 | | bpvps1 | bpvps2 | Both | Ceiling | Headroom |
 |---|---|---|---|---|---|
@@ -64,7 +70,12 @@ every run. Nothing on vps1-staging, vps2-prod or vps3-prod is watched.
 | Series, estimated once deployed (+ `alloy`, `probes`, bpvps1's `backup`, and the textfile series) | ~136 | ~106 | **~242** | 10,000 | **~97.6%** |
 | Synthetic Monitoring series (11 checks × 3 probes) | | | _pending — read `grafanacloud_instance_active_series` after apply_ | | |
 | Container logs, bytes in the last 24 h — **measured** | 2.0 MB (wordpress 1.6 MB, stalwart 0.36 MB) | 7 KB | ~2 MB/day ≈ **60 MB/month** | 50 GB | **~99.9%** |
-| Measured in Grafana Cloud after a week | _pending_ | _pending_ | _pending_ | | |
+| **Measured in Grafana Cloud, 2026-09-15** (1 day, see above) | 154 | 128 | **1,569 total**, incl. Synthetics and Grafana's own series | 10,000 | **84.3%** |
+
+The estimate above was ~242 for the two hosts; the hosts themselves came in at **282**, close
+enough. The rest of the 1,569 is Synthetic Monitoring and Grafana Cloud's own bookkeeping
+series, which the estimate did not attempt. `Active series over 80% of the ceiling` is
+`inactive`, with room for roughly five more hosts before it is not.
 
 How the source figures were taken: series — the real exporter config run briefly on each host
 and its output filtered through `metrics.allowlist` (root cgroup dropped, as `config.alloy` does);
