@@ -119,7 +119,7 @@ Moved here from VPS3 on 2026-07-21. Deploys are driven by `deploy-be.yml` in
 | stalwart, unbound, bulwark | bpvps2 | `blueprintdigital.my` mail moved to bpvps1 in #9 (A records 13:58:55Z); this copy came down at 15:21:12Z, 82 min later, after JMAP confirmed **zero** messages had arrived on it since the cutover (newest mail 2026-08-31). Its 52 MB of test mail was discarded, not migrated. |
 | `stalwart_stalwart-data`, `stalwart_bulwark-{settings,admin,admin-state,telemetry}` | bpvps2 | All five named volumes removed (`compose down -v`). `stalwart_mailnet` went with them. |
 | `/root/stacks/stalwart/` + `dynamic/stalwart.yml` | bpvps2 | Traefik lost its file provider, the `/certs` mount and the `mailnet` alias (recreated 15:20:54Z, ~18 s). The `acme/` tree was root-owned and had to be deleted through an `alpine` container. |
-| `renew-cert.sh` daily cron | bpvps2 | `deploy`'s crontab is now empty. The zone-scoped `BPD_CF_DNS_API_TOKEN` it used went with the stack `.env` — **revoke it in the Blueprint Cloudflare dashboard**. |
+| `renew-cert.sh` daily cron | bpvps2 | `deploy`'s crontab is now empty. The zone-scoped `BPD_CF_DNS_API_TOKEN` it used went with the stack `.env`, and was **revoked in the Blueprint Cloudflare dashboard on 2026-09-15 (#20)** — it had outlived the stack it guarded by three days. |
 | `stalwart_roundcube-data` | bpvps1 | 33.7 MB orphan from the Roundcube → Bulwark switch; nothing mounted it. |
 
 **Firewall group 319466 was not touched** — it is shared with bpvps1, so closing the mail ports
