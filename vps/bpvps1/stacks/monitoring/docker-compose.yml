@@ -70,6 +70,10 @@ services:
     pull_policy: build
     container_name: probes
     restart: unless-stopped
+    # tini as PID 1. crond does not reap orphans: every `timeout` a probe left behind stayed a
+    # zombie, and on 2026-09-15 bpvps2's 4,103 of them filled the 64m limit with kernel memory
+    # until every probe timed out and the mail heartbeat stopped.
+    init: true
     network_mode: host
     environment:
       TZ: Asia/Kuala_Lumpur

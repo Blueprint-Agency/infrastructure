@@ -79,6 +79,10 @@ services:
     pull_policy: build
     container_name: probes
     restart: unless-stopped
+    # tini as PID 1. crond does not reap orphans: every `timeout` a probe left behind stayed a
+    # zombie, and on 2026-09-15 4,103 of them filled the 64m limit with kernel memory until every
+    # probe timed out and the mail heartbeat stopped.
+    init: true
     # The host's addresses, so the mail job can tell whether it IS the mail host, and a real
     # outbound path to the target rather than a bridge's NAT.
     network_mode: host
