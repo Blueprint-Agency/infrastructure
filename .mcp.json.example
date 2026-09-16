@@ -49,6 +49,10 @@
       "headers": {
         "Authorization": "Bearer <VERCEL_API_TOKEN>"
       }
+    },
+    "resend": {
+      "type": "http",
+      "url": "https://mcp.resend.com/mcp"
     }
   }
 }
