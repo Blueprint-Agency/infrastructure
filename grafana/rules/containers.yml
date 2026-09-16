@@ -67,7 +67,8 @@ groups:
           severity: critical
           host: bpvps1
         annotations:
-          summary: "{{ $labels.container }} on {{ $labels.host }} has reported no metrics for 3 minutes"
+          summary: "{{ $labels.container }} on {{ $labels.host }}"
+          value: "no metrics for 3 minutes"
           description: >-
             The container is stopped, crash-looping, or was removed. stalwart, bulwark or unbound
             down means mail for all three domains. If every container on the host fires at once,
@@ -115,7 +116,8 @@ groups:
           severity: critical
           host: bpvps2
         annotations:
-          summary: "{{ $labels.container }} on {{ $labels.host }} has reported no metrics for 3 minutes"
+          summary: "{{ $labels.container }} on {{ $labels.host }}"
+          value: "no metrics for 3 minutes"
           description: >-
             The container is stopped, crash-looping, or was removed. booking-*-staging holds
             the real studio data; booking-*-prod is the fresh instance. If every container on

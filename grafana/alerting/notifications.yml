@@ -24,26 +24,54 @@ contact_points:
     settings:
       url: ${DISCORD_WEBHOOK_URL}
 
-      # Default Discord formatting dumps every label and annotation of every instance. Ten
-      # containers on a host then produce a wall nobody reads on a phone -- which is the only
-      # screen that matters at 3am. So: one line per alert, and the description once.
+      # Default Discord formatting dumps every label and annotation of every instance -- a wall
+      # nobody reads on a phone. So: one line per alert, the description once, and the STATE
+      # said in words. Sources: docs/research/grafana-discord-alert-format.md.
       #
-      # The count in the title is the diagnosis. "Container down on bpvps1 (11)" is not eleven
-      # failures; it is the agent or the host being gone. grafana/rules/containers.yml says so
-      # in the description, but the title is what is visible on a lock screen.
+      # Grafana re-renders a rule's annotations when it resolves, so a summary written as "X is
+      # broken" arrives under a green dot still saying it is broken. Hence the split every rule
+      # follows: `summary` names WHAT is checked and reads right in both states; `value` says
+      # what is wrong and is printed only under Firing. The template supplies the state.
+      #
+      # One notification can carry firing AND resolved alerts, and Discord colours the whole
+      # card red if any one fires -- so they are two labelled lists, never one mixed list.
+      #
+      # "N firing" in the title is the diagnosis. "Container down on bpvps1 · 11 firing" is not
+      # eleven failures; it is the agent or the host being gone.
+      #
+      # Message inside the coloured card (grafana/alerting#368, "Show Message in Embed" in the
+      # UI). Cost: @mentions stop pinging, and none are sent. On a build without it, the key is
+      # ignored and the message sits above the card, as before.
+      use_embed_description: true
+
       title: >-
-        {{ if eq .Status "firing" }}🔴{{ else }}🟢{{ end }} {{ .CommonLabels.alertname }}{{ if
-        gt (len .Alerts) 1 }} ({{ len .Alerts }}){{ end }}
+        {{- if .Alerts.Firing -}}
+        🔴 {{ with .CommonLabels.severity }}{{ toUpper . }}{{ else }}FIRING{{ end }}
+        {{- else -}}
+        ✅ RESOLVED
+        {{- end }} · {{ .CommonLabels.alertname }}
+        {{- if gt (len .Alerts.Firing) 1 }} · {{ len .Alerts.Firing }} firing{{ end }}
+        {{- if and .Alerts.Firing .Alerts.Resolved }} · {{ len .Alerts.Resolved }} cleared{{ end }}
 
       # Labels are omitted on purpose: every summary already names its container and host.
       message: |-
-        {{ range .Alerts -}}
-        {{ if eq .Status "firing" }}🔴{{ else }}🟢{{ end }} {{ .Annotations.summary }}
+        {{- if .Alerts.Firing -}}
+        **Firing**
+        {{- range .Alerts.Firing }}
+        • {{ .Annotations.summary }}{{ with .Annotations.value }}: **{{ . }}**{{ end }} · since {{ .StartsAt | tz "Asia/Kuala_Lumpur" | date "02 Jan 15:04" }}
+        {{- end }}
+        {{ with index .Alerts.Firing 0 }}{{ with .Annotations.description }}
+        > {{ . }}
         {{ end }}
-        {{- if eq .Status "firing" }}
-        {{ with .CommonAnnotations.description }}> {{ . }}
-        {{ end }}
-        [Open]({{ .ExternalURL }}/alerting/list) · [Silence]({{ (index .Alerts 0).SilenceURL }})
+        [Runbook]({{ with .Annotations.runbook_url }}{{ . }}{{ else }}https://github.com/Blueprint-Agency/infrastructure/blob/main/docs/monitoring.md#what-each-alert-means-and-the-first-three-things-to-check{{ end }}) · [Silence]({{ .SilenceURL }})
+        {{- end }}
+        {{- end }}
+        {{- if .Alerts.Resolved }}
+        {{ if .Alerts.Firing }}
+        {{ end }}**Resolved**
+        {{- range .Alerts.Resolved }}
+        • {{ .Annotations.summary }} · {{ .StartsAt | tz "Asia/Kuala_Lumpur" | date "02 Jan 15:04" }} → {{ .EndsAt | tz "Asia/Kuala_Lumpur" | date "15:04" }}
+        {{- end }}
         {{- end }}
 
 # The routing tree. `group_by` includes `host` so a bpvps1 problem and a bpvps2 problem never

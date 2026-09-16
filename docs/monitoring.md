@@ -250,6 +250,13 @@ a container gone, a heartbeat gone — has to name the host in `absent_over_time
 `container-down-`, `backup-stale-` and `probes-stale-` exist once per host. CI requires them for
 every monitored host, and every selector in them must carry that host's `host=` matcher.
 
+**How a rule's annotations are written.** `summary` names *what* is checked and nothing about
+its state (`Disk / on bpvps2`); `value` says what is wrong (`93% full`); `description` is the
+first action. Grafana re-renders annotations at the moment an alert resolves, so a summary
+written as "X is broken" arrives in Discord under ✅ RESOLVED still saying it is broken. The
+Discord template in `grafana/alerting/notifications.yml` prints `value` only under **Firing**.
+Why, with sources: `docs/research/grafana-discord-alert-format.md`.
+
 `container-down-<host>` **names every container** on the host. A rule over all containers at once
 cannot work: a stopped container's series just stops, and Grafana treats a vanished series as
 resolved. CI fails when a compose file on the host defines a container the rule does not name.

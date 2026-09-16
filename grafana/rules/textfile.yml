@@ -47,7 +47,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "A *.prom file on {{ $labels.host }} cannot be parsed"
+          summary: "Textfile metrics on {{ $labels.host }}"
+          value: "a *.prom file cannot be parsed"
           description: >-
             The agent skips a malformed file, so that producer's metrics stop and its staleness
             alert follows. `ssh bp-{{ $labels.host }} 'docker logs --tail 50 alloy'` names the file.
@@ -91,7 +92,8 @@ groups:
           severity: warning
           host: bpvps1
         annotations:
-          summary: "bpvps1 probe {{ $labels.probe }} has not completed in time (no probe label: no probe heartbeat at all)"
+          summary: '{{ with $labels.probe }}Probe "{{ . }}"{{ else }}Every probe{{ end }} on bpvps1'
+          value: "{{ if $labels.probe }}no successful run within its max age{{ else }}no heartbeat at all{{ end }}"
           description: >-
             `ssh bp-bpvps1 'docker ps --filter name=probes; docker logs --tail 50 probes'` -- a failing
             job logs why. While it is stale, the alert it feeds (restarts, Postgres, Tailscale) cannot
@@ -129,7 +131,8 @@ groups:
           severity: warning
           host: bpvps2
         annotations:
-          summary: "bpvps2 probe {{ $labels.probe }} has not completed in time (no probe label: no probe heartbeat at all)"
+          summary: '{{ with $labels.probe }}Probe "{{ . }}"{{ else }}Every probe{{ end }} on bpvps2'
+          value: "{{ if $labels.probe }}no successful run within its max age{{ else }}no heartbeat at all{{ end }}"
           description: >-
             `ssh bp-bpvps2 'docker ps --filter name=probes; docker logs --tail 50 probes'` -- a failing
             job logs why. probe=mail stale or absent means bpvps1's mail ports are NOT being watched --
@@ -169,7 +172,9 @@ groups:
           severity: critical
           host: bpvps1
         annotations:
-          summary: "bpvps1 backup {{ $labels.target }} has not succeeded in 26 hours (no target label: no heartbeat at all)"
+          summary: '{{ with $labels.target }}Backup "{{ . }}"{{ else }}Every backup target{{ end }} on bpvps1'
+          value: "{{ if $labels.target }}no success in 26 hours{{ else }}no heartbeat at all{{ end }}"
+          runbook_url: https://github.com/Blueprint-Agency/infrastructure/blob/main/docs/backup-restore.md
           description: >-
             Either a target's snapshot failed last night, or backup.prom is gone. Check
             `ssh bp-bpvps1 'docker ps --filter name=backup; docker logs --tail 100 backup'`. If
@@ -207,7 +212,9 @@ groups:
           severity: critical
           host: bpvps2
         annotations:
-          summary: "bpvps2 backup {{ $labels.target }} has not succeeded in 26 hours (no target label: no heartbeat at all)"
+          summary: '{{ with $labels.target }}Backup "{{ . }}"{{ else }}Every backup target{{ end }} on bpvps2'
+          value: "{{ if $labels.target }}no success in 26 hours{{ else }}no heartbeat at all{{ end }}"
+          runbook_url: https://github.com/Blueprint-Agency/infrastructure/blob/main/docs/backup-restore.md
           description: >-
             Either a target's snapshot failed last night, or backup.prom is gone. Check
             `ssh bp-bpvps2 'docker ps --filter name=backup; docker logs --tail 100 backup'`. If
@@ -244,7 +251,8 @@ groups:
         labels:
           severity: info
         annotations:
-          summary: "textfile canary on {{ $labels.host }} is {{ humanizeDuration $values.A.Value }} old"
+          summary: "Textfile canary on {{ $labels.host }}"
+          value: "{{ humanizeDuration $values.A.Value }} old"
           description: >-
             Expected only during the textfile seam test in docs/textfile-metrics.md. Outside it, someone
             left /textfile/canary.prom behind: delete it and this resolves.

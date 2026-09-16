@@ -68,7 +68,8 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "{{ $labels.job }} on {{ $labels.host }} is failing from every probe"
+          summary: "{{ $labels.job }} on {{ $labels.host }}"
+          value: "failing from every probe"
           description: >-
             Every Grafana probe has failed at least two runs in a row against {{ $labels.instance }}.
             If every name on {{ $labels.host }} fires together, suspect Traefik or the host:
@@ -115,7 +116,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "{{ $labels.job }} on {{ $labels.host }}: TLS certificate expires in {{ humanize $values.A.Value }} days"
+          summary: "TLS certificate for {{ $labels.job }} on {{ $labels.host }}"
+          value: "expires in {{ humanize $values.A.Value }} days"
           description: >-
             The certificate served for {{ $labels.job }} has under 21 days left, so renewal has been
             failing for over a week. Which renewer owns the name: docs/monitoring.md, "External checks".
