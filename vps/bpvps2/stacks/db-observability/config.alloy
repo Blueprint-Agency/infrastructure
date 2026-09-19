@@ -1,0 +1,168 @@
+// Grafana Alloy -- Grafana Database Observability for the two booking Postgres instances
+// (booking-system#166). Query statistics, query samples and schema details to Grafana Cloud.
+// Runbook: docs/monitoring.md, "Database Observability".
+//
+// Why a second agent, and not a few blocks in the monitoring stack's config.alloy:
+//   - That agent runs on the HOST network, and neither booking Postgres publishes a port.
+//     This one sits on both booking networks and reaches each database by container name.
+//   - That config is one implementation copied to every monitored host (CI fails on drift),
+//     and only bpvps2 has a booking database.
+//
+// What leaves the host is bounded twice: the collectors below, and the keep-list in
+// prometheus.relabel "keep" at the bottom. The free tier is 10,000 active series for the
+// whole account; this stack's share is about 1,100 (docs/monitoring.md, "Budget").
+//
+// Credentials: the monitoring role `db-o11y` (setup-db-o11y.sql, next to this file) with its
+// own password per instance, and the same Grafana Cloud token as the monitoring stack. All
+// from the environment, which CI renders from the bpvps2 GitHub Environment (ci/env.ci).
+
+logging {
+  level = "warn"
+}
+
+// One booking Postgres: the exporter for pg_stat_statements metrics, the Database
+// Observability collectors, and the labels Database Observability groups by.
+declare "booking_postgres" {
+  // booking-staging | booking-prod -- the stack directory, as `compose_project` is everywhere
+  // else. Becomes the `instance` label, which is what Database Observability lists.
+  argument "instance" {}
+
+  // The container name, which resolves on that instance's booking network.
+  argument "db_host" {}
+
+  argument "password" {}
+  argument "metrics_receiver" {}
+  argument "logs_receiver" {}
+
+  // Database `postgres`, as Grafana recommends: autodiscovery below finds the booking
+  // database on its own, so its name (a secret in booking-system's deploy) never appears here.
+  // No TLS: the connection never leaves the booking network on this host.
+  // The password is generated hex (docs/monitoring.md), so it needs no URL escaping.
+  prometheus.exporter.postgres "db" {
+    data_source_names = [string.format("postgres://db-o11y:%s@%s:5432/postgres?sslmode=disable", argument.password.value, argument.db_host.value)]
+
+    // pg_settings is ~300 series per instance and nothing reads it.
+    disable_settings_metrics = true
+    enabled_collectors       = ["stat_statements", "database", "stat_database"]
+
+    stat_statements {
+      exclude_users = ["db-o11y"]
+      // The statements with the most total time. Each one is ~5 series; see "Budget".
+      limit = 100
+    }
+
+    autodiscovery {
+      enabled = true
+    }
+  }
+
+  database_observability.postgres "db" {
+    data_source_name = string.format("postgres://db-o11y:%s@%s:5432/postgres?sslmode=disable", argument.password.value, argument.db_host.value)
+    targets          = prometheus.exporter.postgres.db.targets
+    forward_to       = [loki.relabel.db.receiver]
+
+    // explain_plans OFF: EXPLAIN needs SELECT on the tables it plans, and that grant would let
+    // the monitoring role read every Tenant's members and payments. query_details,
+    // query_samples and schema_details need only pg_monitor and the system catalogs.
+    // query_samples REDACTS literals by default (disable_query_redaction = false); keep it so.
+    disable_collectors = ["explain_plans"]
+  }
+
+  loki.relabel "db" {
+    forward_to = [argument.logs_receiver.value]
+
+    rule {
+      target_label = "instance"
+      replacement  = argument.instance.value
+    }
+
+    rule {
+      target_label = "host"
+      replacement  = sys.env("MONITORING_HOST")
+    }
+  }
+
+  discovery.relabel "db" {
+    targets = database_observability.postgres.db.targets
+
+    // The job name Database Observability looks for.
+    rule {
+      target_label = "job"
+      replacement  = "integrations/db-o11y"
+    }
+
+    rule {
+      target_label = "instance"
+      replacement  = argument.instance.value
+    }
+
+    rule {
+      target_label = "host"
+      replacement  = sys.env("MONITORING_HOST")
+    }
+  }
+
+  // 60 s, as everywhere else: free-tier series are priced at one data point per minute.
+  prometheus.scrape "db" {
+    targets         = discovery.relabel.db.output
+    job_name        = "integrations/db-o11y"
+    scrape_interval = "60s"
+    forward_to      = [argument.metrics_receiver.value]
+  }
+}
+
+booking_postgres "staging" {
+  instance         = "booking-staging"
+  db_host          = "booking-db-staging"
+  password         = sys.env("DB_O11Y_STAGING_PASSWORD")
+  metrics_receiver = prometheus.relabel.keep.receiver
+  logs_receiver    = loki.write.grafana_cloud.receiver
+}
+
+booking_postgres "prod" {
+  instance         = "booking-prod"
+  db_host          = "booking-db-prod"
+  password         = sys.env("DB_O11Y_PROD_PASSWORD")
+  metrics_receiver = prometheus.relabel.keep.receiver
+  logs_receiver    = loki.write.grafana_cloud.receiver
+}
+
+// The series budget. An allowlist, as in the monitoring stack: whatever the exporter adds in
+// a future Alloy, only these families leave the host.
+//   up                            scrape health, per target
+//   database_observability_.*     the component's own metrics (connection info, errors)
+//   pg_up, pg_stat_statements_.*  what Database Observability's query views read
+//   pg_stat_database_* (subset)   per-database throughput, cache hits, deadlocks
+//   pg_database_size_bytes        per-database size
+// If a Database Observability view is empty after deploy, check here before anything else.
+prometheus.relabel "keep" {
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+
+  rule {
+    source_labels = ["__name__"]
+    regex         = "up|database_observability_.+|pg_up|pg_stat_statements_.+|pg_stat_database_(numbackends|xact_commit|xact_rollback|blks_read|blks_hit|deadlocks|temp_bytes)|pg_database_size_bytes"
+    action        = "keep"
+  }
+}
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_PROM_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_PROM_USER")
+      password = sys.env("GRAFANA_CLOUD_API_TOKEN")
+    }
+  }
+}
+
+loki.write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_LOKI_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_LOKI_USER")
+      password = sys.env("GRAFANA_CLOUD_API_TOKEN")
+    }
+  }
+}
