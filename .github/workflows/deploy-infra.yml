@@ -213,6 +213,8 @@ jobs:
           GRAFANA_CLOUD_LOKI_URL: ${{ vars.GRAFANA_CLOUD_LOKI_URL }}
           GRAFANA_CLOUD_LOKI_USER: ${{ vars.GRAFANA_CLOUD_LOKI_USER }}
           GRAFANA_CLOUD_API_TOKEN: ${{ secrets.GRAFANA_CLOUD_API_TOKEN }}
+          DB_O11Y_STAGING_PASSWORD: ${{ secrets.DB_O11Y_STAGING_PASSWORD }}
+          DB_O11Y_PROD_PASSWORD: ${{ secrets.DB_O11Y_PROD_PASSWORD }}
         run: |
           RSH="ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=no"
 

@@ -129,6 +129,11 @@ host whose on-host dirs differ from the repo: a single `booking` stack fans out 
 > `no_monitoring: <reason>` fails CI (`vps/shared/check-monitoring.py`). Mail ports are never
 > probed from bpvps1 or a laptop. Runbook — every alert's meaning and first three checks, and the
 > tune-or-delete rule: `docs/monitoring.md`. Deployed: _not yet_ (Grafana Cloud setup pending).
+> **bpvps2 also runs `db-observability`** (booking-system#166): a second Alloy, on both booking
+> networks, feeding Grafana Database Observability from both booking Postgres instances as the
+> read-no-data role `db-o11y`. It is not part of the one-implementation monitoring stack, and it
+> needs one-time SQL per instance (`setup-db-o11y.sql`) — `docs/monitoring.md`, "Database Observability".
+> Every booking service carries a json-file log cap (10m × 3).
 
 > **What a host backs up is `vps/<host>/stacks/backup/targets.yml`** (#27) — every **in-scope**
 > host has one, and CI fails if a named volume in that host's compose files is neither in it nor

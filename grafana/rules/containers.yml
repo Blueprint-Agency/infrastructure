@@ -95,6 +95,7 @@ groups:
                 or absent_over_time(container_last_seen{host="bpvps2", container="booking-be-prod"}[3m])
                 or absent_over_time(container_last_seen{host="bpvps2", container="booking-db-prod"}[3m])
                 or absent_over_time(container_last_seen{host="bpvps2", container="backup"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps2", container="db-observability"}[3m])
           - refId: C
             relativeTimeRange:
               from: 600

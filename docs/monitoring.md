@@ -26,6 +26,7 @@ every run. Nothing on vps1-staging, vps2-prod or vps3-prod is watched.
 |---|---|
 | Agent | `vps/<host>/stacks/monitoring/` — container `alloy`, deployed by `deploy-infra.yml` like any stack |
 | Textfile probes | same stack, container `probes` — restart counts, Postgres connections, Tailscale key expiry, mail ports. `probes/bin/probe.sh` |
+| Database Observability | bpvps2 only: `vps/bpvps2/stacks/db-observability/`, container `db-observability` — a second Alloy on the booking networks. See its section |
 | One implementation | everything in that stack **except `docker-compose.yml` and `ci/`** is an identical copy on both hosts. CI fails if the copies drift: change both in one commit |
 | Alloy version | the `FROM` line of the stack's `Dockerfile`, exact tag. CI validates `config.alloy` against it |
 | What metrics ship | `metrics.allowlist` — one metric name per line, **keep** only those |
@@ -71,6 +72,7 @@ the conclusion. Re-read it if a stack is added.
 | Synthetic Monitoring series (11 checks × 3 probes) | | | _pending — read `grafanacloud_instance_active_series` after apply_ | | |
 | Container logs, bytes in the last 24 h — **measured** | 2.0 MB (wordpress 1.6 MB, stalwart 0.36 MB) | 7 KB | ~2 MB/day ≈ **60 MB/month** | 50 GB | **~99.9%** |
 | **Measured in Grafana Cloud, 2026-09-15** (1 day, see above) | 154 | 128 | **1,569 total**, incl. Synthetics and Grafana's own series | 10,000 | **84.3%** |
+| Database Observability (#166), **estimated** — see its section | | ~1,100 | ~1,100 | | _re-read after deploy_ |
 
 The estimate above was ~242 for the two hosts; the hosts themselves came in at **282**, close
 enough. The rest of the 1,569 is Synthetic Monitoring and Grafana Cloud's own bookkeeping
@@ -109,6 +111,18 @@ Every metric and log line carries:
 | `container` | `booking-be-staging`, `stalwart`, `traefik`, … |
 | `compose_project` | the **stack directory** on the host — `booking-staging` vs `booking-prod` |
 | `compose_service` | the compose service key — `booking-be`, `db-booking`, … |
+
+One more, **on logs only, and only on `booking-be`**: `level`, the Pino level of each JSON line
+(`trace` … `fatal`). The backend's other fields — `requestId`, `tenantId`, `actorId`, `job`,
+`webhook`, `outcome` — are **never labels**: the first three are unbounded (a stream per request,
+Tenant or user), and all six are read at query time with `| json`. A Tenant is always its id,
+never a studio's name, in every query and rule.
+
+```logql
+sum by (container) (count_over_time({container="booking-be-staging", level="error"} [5m]))
+{container="booking-be-staging", level="error"} | json | webhook="stripe"
+sum(count_over_time({container="booking-be-staging"} | json | job="<job>" | outcome="ok" [25h]))
+```
 
 Probe heartbeats carry `probe` (`docker`, `postgres`, `mail`, `tailscale`) — **never `job`**, which
 the agent's scrape owns and would rename to `exported_job`.
@@ -162,6 +176,61 @@ Search in Grafana Cloud → **Explore → grafanacloud-logs**:
 ```logql
 {host="bpvps1", container="stalwart"} |= "some text"
 ```
+
+**Log caps on the host (#166).** Every service in the booking compose carries `logging:` json-file,
+`max-size: 10m`, `max-file: 3` — at most 30 MB of local log per container, whatever a crash-loop
+writes. Loki is the durable copy; rotation only drops the host-local tail. The booking compose is an
+`app_stack`, so the caps take effect when booking-system's deploy next recreates the containers
+(or `docker compose up -d` by hand in `/root/stacks/booking-{staging,prod}`). Check with
+`docker inspect booking-be-staging --format '{{json .HostConfig.LogConfig}}'`.
+
+## Database Observability (#166)
+
+Grafana Cloud's **Database Observability** — query statistics, query samples with wait events, and
+schema details — for **both booking Postgres instances**, from its own stack on bpvps2:
+`vps/bpvps2/stacks/db-observability/`, container `db-observability`.
+
+| | |
+|---|---|
+| Why a separate stack | the `alloy` agent is on the host network and neither Postgres publishes a port; this one joins `booking-staging-network` and `booking-prod-network` and dials `booking-db-staging` / `booking-db-prod`. And the monitoring stack is one implementation on both hosts; only bpvps2 has these databases |
+| Postgres side | the booking compose's `command:` preloads `pg_stat_statements` with `compute_query_id=on`, `pg_stat_statements.track=all`, `track_activity_query_size=4096` — startup settings, so the next booking deploy restarts each Postgres once |
+| Monitoring role | `db-o11y`, `pg_monitor` only, `NOBYPASSRLS`, connection limit 10, a different password per instance. **It cannot read a row of booking data** — no `SELECT`, no `pg_read_all_data`. Created by hand once per instance with `setup-db-o11y.sql` (below) |
+| Collectors | `query_details`, `query_samples` (literals redacted — the default, keep it), `schema_details`, and the exporter's `stat_statements`, `database`, `stat_database`. **`explain_plans` is off**: `EXPLAIN` needs `SELECT` on every table it plans, which is read access to every Tenant's members and payments |
+| Labels | `job="integrations/db-o11y"` (what Database Observability looks for), `instance` = `booking-staging` / `booking-prod`, `host` |
+| Budget | a keep-list in its `config.alloy` (`prometheus.relabel "keep"`). ~290 series per instance measured against a local Postgres; `stat_statements { limit = 100 }` bounds it near 540 each, **~1,100 for both**. Query samples and schema details are Loki lines, not series |
+| Not collected | Postgres's own server log (the `logs` collector wants `log_line_prefix` changed and a file to tail; its container log already reaches Loki through `alloy`) |
+
+### Turning it on — once, in this order
+
+1. **Two passwords, before merging**, hex so they need no URL escaping: `openssl rand -hex 24`,
+   twice. Store them as **secrets** `DB_O11Y_STAGING_PASSWORD` and `DB_O11Y_PROD_PASSWORD` in the
+   **bpvps2** GitHub Environment on `Blueprint-Agency/infrastructure`. An unset one fails the deploy
+   by design — and the merge deploys this stack.
+2. **Merge.** CI deploys `db-observability` (it logs `failed to ping database` and retries until
+   step 4 — expected), redeploys `alloy` on both hosts, and syncs the booking compose without
+   starting it (booking is an `app_stack`).
+3. **Restart each booking Postgres onto the new settings**: booking-system's next deploy does it, or
+   `docker compose up -d` in each `/root/stacks/booking-*` — a few seconds of database downtime
+   each; it also applies the log caps. Confirm:
+   `docker exec booking-db-staging sh -c 'psql -U "$POSTGRES_USER" -d postgres -tAc "show shared_preload_libraries"'`
+   prints `pg_stat_statements`.
+4. **Create the role** on each instance, from `/root/stacks/db-observability` on bpvps2, where CI put
+   the SQL. The script refuses to run before step 3:
+   ```bash
+   read -rs PW   # the staging password from step 1
+   docker exec -i -e PW="$PW" booking-db-staging sh -c \
+     'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres -v pw="$PW" -v booking_db="$POSTGRES_DB"' \
+     < setup-db-o11y.sql
+   # then the same with the prod password and booking-db-prod
+   ```
+   Pass: `pg_stat_statements_readable = t`, `compute_query_id = on`, `pg_stat_statements_track = all`.
+5. **Verify**: `ssh bp-bpvps2 'docker logs --tail 50 db-observability'` shows no `failed to ping
+   database`; Grafana Cloud → **Database Observability → Configuration → Telemetry status** passes
+   for `booking-staging` and `booking-prod`; **Queries overview** lists queries within a few minutes.
+
+If a Database Observability view stays empty while telemetry status passes, the keep-list is the
+first suspect: it names what leaves the host, and a newer Database Observability may read a metric
+it does not keep.
 
 ## External checks
 
@@ -378,6 +447,8 @@ own addresses. **No address is committed here** — this repository is public.
    repo in the org could read the token. Variables `GRAFANA_CLOUD_PROM_URL`,
    `GRAFANA_CLOUD_PROM_USER`, `GRAFANA_CLOUD_LOKI_URL`, `GRAFANA_CLOUD_LOKI_USER` (endpoints and
    instance IDs, not secret); secret `GRAFANA_CLOUD_API_TOKEN`. An unset one fails the deploy by design.
+   bpvps2 also needs secrets `DB_O11Y_STAGING_PASSWORD` and `DB_O11Y_PROD_PASSWORD` for its
+   `db-observability` stack — see "Database Observability" for the order.
 3. Create a **service account** (Editor) and token for `grafana-apply.py`; put `GRAFANA_URL` and
    `GRAFANA_SA_TOKEN` in the local `.env`.
 4. Open **Testing & synthetics → Synthetics** once, which initialises Synthetic Monitoring on the

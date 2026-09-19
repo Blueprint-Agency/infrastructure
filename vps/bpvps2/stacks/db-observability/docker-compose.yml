@@ -1,0 +1,68 @@
+# db-observability — Grafana Database Observability for both booking Postgres instances
+# (booking-system#166). One Grafana Alloy, config in config.alloy next to this file.
+#
+# Runbook (the one-time database setup, secrets, how to verify): docs/monitoring.md,
+# "Database Observability". The database side is setup-db-o11y.sql, next to this file --
+# run once per instance BEFORE this stack first deploys, or the agent connects to nothing.
+#
+# ONE container for both instances, NOT a sidecar in the booking compose: that file is
+# deployed twice and owned by booking-system's deploy, which runs `up --remove-orphans`.
+# It joins BOTH booking networks and reaches each Postgres by container name
+# (booking-db-staging, booking-db-prod). Joining two networks bridges nothing between them:
+# Alloy is a client on each, not a router.
+#
+# Outbound only. No port published, no Traefik. The `alloy` agent in the monitoring stack
+# reports this container's CPU/memory and ships its log like any other.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db-observability:
+    build: .
+    image: blueprint-db-observability:local
+    pull_policy: build
+    container_name: db-observability
+    restart: unless-stopped
+    logging: *logging
+    command:
+      - run
+      # The container's own loopback: the debug UI answers nowhere else.
+      - --server.http.listen-addr=127.0.0.1:12345
+      - --storage.path=/var/lib/alloy/data
+      - --disable-reporting
+      - /etc/alloy/config.alloy
+    environment:
+      TZ: Asia/Kuala_Lumpur
+      # The `host` label, as in the monitoring stack: the vps/hosts.json key.
+      MONITORING_HOST: bpvps2
+      # From ci/env.ci, rendered by CI from the bpvps2 GitHub Environment; a blank one fails
+      # the deploy. The Grafana Cloud five are the monitoring stack's, unchanged.
+      GRAFANA_CLOUD_PROM_URL: ${GRAFANA_CLOUD_PROM_URL}
+      GRAFANA_CLOUD_PROM_USER: ${GRAFANA_CLOUD_PROM_USER}
+      GRAFANA_CLOUD_LOKI_URL: ${GRAFANA_CLOUD_LOKI_URL}
+      GRAFANA_CLOUD_LOKI_USER: ${GRAFANA_CLOUD_LOKI_USER}
+      GRAFANA_CLOUD_API_TOKEN: ${GRAFANA_CLOUD_API_TOKEN}
+      # The `db-o11y` role's password on each instance -- different on each.
+      DB_O11Y_STAGING_PASSWORD: ${DB_O11Y_STAGING_PASSWORD}
+      DB_O11Y_PROD_PASSWORD: ${DB_O11Y_PROD_PASSWORD}
+    networks:
+      - booking-staging
+      - booking-prod
+    # No volume: the only state is the metrics WAL, and losing it on a recreate costs a
+    # minute of query statistics, not a backup target (vps/bpvps2/stacks/backup/targets.yml).
+    # Guard rails on a 1 vCPU / 4 GB host that serves the booking API.
+    cpus: 0.25
+    mem_limit: 256m
+
+networks:
+  # Created by the booking stacks. `compose up` refuses a missing external network, so this
+  # stack cannot come up before both booking instances exist -- which they do.
+  booking-staging:
+    external: true
+    name: booking-staging-network
+  booking-prod:
+    external: true
+    name: booking-prod-network

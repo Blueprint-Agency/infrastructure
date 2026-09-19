@@ -10,11 +10,16 @@
 //   metrics  metrics.allowlist -- one metric name per line, KEEP only those
 //   logs     loki.process "select" below -- every container, minus Traefik access logs
 //
+// Postgres query-level telemetry (Database Observability) is NOT here: this agent is on the
+// host network and cannot reach a database that publishes no port. It is bpvps2's own
+// db-observability stack, which joins the booking networks.
+//
 // The labels every signal carries, and which panels and rules filter on:
 //   host             MONITORING_HOST from docker-compose.yml -- the vps/hosts.json key
 //   container        booking-be-staging, booking-db-prod, traefik, ...
 //   compose_project  the stack DIRECTORY on the host: booking-staging vs booking-prod
 //   compose_service  the service key: booking-be, db-booking, ...
+//   level            LOGS ONLY, booking-be only: the Pino level of a JSON line (see "select")
 
 logging {
   // Alloy's own log goes to Grafana Cloud with every other container's; info is chatty.
@@ -191,6 +196,29 @@ loki.process "select" {
     stage.drop {
       expression          = "\"RequestMethod\":"
       drop_counter_reason = "traefik_access_log"
+    }
+  }
+
+  // The booking backend writes one JSON object per line (Pino). Its `level` becomes a label
+  // (booking-system#166): the error-rate and webhook-failure alert rules select on it, and a
+  // label is read from the index instead of parsing every line in the window. Pino has six
+  // fixed levels (trace..fatal), so this at most multiplies booking-be's streams by six.
+  //
+  // NOTHING ELSE in the line becomes a label. requestId, tenantId and actorId are unbounded
+  // -- one stream per request, per Tenant, per user would be the classic Loki cardinality
+  // blow-up. job, webhook and outcome stay in the line too: `| json | job="..."` in LogQL
+  // reads them at query time, which is all the rules need. A line that is not JSON (a boot
+  // banner, a stack trace from before the logger is up) passes through unlabelled.
+  // Both instances match: they share the service key, and `container` tells them apart.
+  stage.match {
+    selector = "{compose_service=\"booking-be\"}"
+
+    stage.json {
+      expressions = {level = ""}
+    }
+
+    stage.labels {
+      values = {level = ""}
     }
   }
 }
