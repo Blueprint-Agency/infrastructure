@@ -85,6 +85,18 @@ http = body["settings"]["http"]
 assert http["failIfNotSSL"] is True and http["noFollowRedirects"] is False and http["method"] == "GET"
 assert "id" not in body and "tenantId" not in body
 
+# An off_platform endpoint (#37) may buy free-tier headroom with its own probes and frequency.
+# Everything derived from a router keeps the file-wide values, which is the case above.
+off = {"hostname": "www.vendor.example", "host": "vercel", "off_platform": True,
+       "url": "https://www.vendor.example/", "probes": ["Singapore"], "frequency": "300s"}
+body = ga.sm_check({**off, "probe_ids": [7]}, [7, 9, 3])
+assert body["probes"] == [7] and body["frequency"] == 300000
+# The label is the platform, so the alert reads "... on vercel" rather than naming a VPS.
+assert {"name": "host", "value": "vercel"} in body["labels"]
+# Names, not ids, are what the file holds: an endpoint whose probes were never resolved falls
+# back to the file-wide list rather than sending Grafana a list of strings.
+assert ga.sm_check(off, [7, 9, 3])["probes"] == [7, 9, 3]
+
 existing = [
     {"id": 1, "tenantId": 42, "job": "api.example.com", "target": "https://api.example.com/",
      "labels": [{"name": "host", "value": "h1"}, {"name": "managed_by", "value": "infrastructure"}]},

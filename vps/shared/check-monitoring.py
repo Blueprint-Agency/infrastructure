@@ -28,6 +28,14 @@ Across monitored hosts:
   5. The stack is one implementation: every file except the compose file and ci/ is identical
      on every host. CI rsyncs only a stack's own dir, so a fix in one copy is a bug in the other.
 
+Off-platform checks (#37):
+
+  6. Every name under `off_platform:` in grafana/synthetic/endpoints.yml -- booking-system's
+     Vercel frontends, which no router here serves -- reaches an alert. Those checks carry
+     `host: <platform>`, not a VPS key, so the moment someone pins grafana/rules/endpoints.yml
+     to host="bpvps1" to quieten something, every off-platform check is probed and alerted on
+     by nothing, and the file still looks correct.
+
 Container names are resolved the way check-backup-targets.py resolves them: container_name
 with ${ENV_NAME} per fanout destination, else <project>-<service>-1.
 
@@ -175,6 +183,31 @@ def check_drift(hosts, problems):
                             "-- the agent is one implementation, copy the change to every host")
 
 
+SYNTHETIC = "grafana/synthetic/endpoints.yml"
+# The rules an off-platform check depends on: both read probe_* / sm_check_info for every job.
+EXTERNAL_RULES = ("endpoint-down", "tls-expiry")
+
+
+def check_off_platform(by_rule, hosts, problems):
+    """6. The names nothing here serves are still alerted on (#37)."""
+    path = pathlib.Path(SYNTHETIC)
+    off = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("off_platform") if path.is_file() else None
+    if not off:
+        return
+    keys = {h["key"] for h in hosts}
+    platforms = sorted({str((e or {}).get("platform") or "?") for e in off.values()})
+    for uid in EXTERNAL_RULES:
+        if uid not in by_rule:
+            problems.append(f"{SYNTHETIC}: {len(off)} off-platform name(s) declared but no alert rule "
+                            f"{uid} under grafana/rules/ -- they would be probed and never alerted on")
+            continue
+        expr = "\n".join(by_rule[uid])
+        for key in sorted(k for k in keys if f'host="{k}"' in expr):
+            problems.append(f"{uid}: pinned to host=\"{key}\" -- an off-platform check's host label is "
+                            f"its platform ({', '.join(platforms)}), so {', '.join(sorted(off))} would "
+                            "be probed and never alerted on")
+
+
 def check_host(host, by_file, by_rule, problems):
     key = host["key"]
     stack = pathlib.Path(host["dir"]) / "stacks" / "monitoring"
@@ -265,6 +298,7 @@ def main():
     for host in hosts:
         check_host(host, by_file, by_rule, problems)
     check_drift(hosts, problems)
+    check_off_platform(by_rule, hosts, problems)
     for p in problems:
         print(p)
     # Printed whatever the verdict: "all clear" must never read as "every host is watched".

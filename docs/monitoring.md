@@ -11,7 +11,8 @@ every run. Nothing on vps1-staging, vps2-prod or vps3-prod is watched.
 
 > **Live since 2026-09-14.** Grafana Cloud stack `blueprintdigital`, region
 > `prod-ap-southeast-1`. Both hosts run `alloy` and `probes` and are shipping metrics and logs;
-> 11 Synthetic checks probe every public name from Singapore, Tokyo and Mumbai; alerts deliver
+> 15 Synthetic checks probe every public name (11 self-hosted, from Singapore, Tokyo and Mumbai;
+> 4 off-platform, from Singapore only — see "External checks"); alerts deliver
 > to Discord. What remains _pending_ below is **testing**, not deployment — and the two that
 > matter most, the Traefik stop (#24) and a real backup heartbeat going stale and recovering,
 > have not been run. Deployed is not the same as proven.
@@ -33,7 +34,7 @@ every run. Nothing on vps1-staging, vps2-prod or vps3-prod is watched.
 | What logs ship | `loki.process "select"` in `config.alloy` — every container, minus Traefik access logs |
 | Dashboards | `grafana/dashboards/*.json` |
 | Alert rules | `grafana/rules/*.yml` (Grafana file-provisioning format) |
-| External checks | one Synthetic Monitoring HTTP check per public name — derived by `vps/shared/public-endpoints.py`, exceptions in `grafana/synthetic/endpoints.yml` |
+| External checks | one Synthetic Monitoring HTTP check per public name — derived by `vps/shared/public-endpoints.py`, exceptions and the hand-typed `off_platform:` names in `grafana/synthetic/endpoints.yml` |
 | Textfile seam | the `monitoring_textfile` volume, read at `/textfile` — contract in [`textfile-metrics.md`](textfile-metrics.md) |
 | Applying them | `scripts/grafana-apply.py` — the files are the copy of record; UI edits are overwritten |
 | Drift check | `vps/shared/check-monitoring.py`, `vps/shared/public-endpoints.py`, `scripts/test_probes_lib.sh`, in CI's `monitoring-drift` job on every push |
@@ -69,7 +70,7 @@ the conclusion. Re-read it if a stack is added.
 |---|---|---|---|---|---|
 | Series, exporters after the allowlist — **measured** | 88 (8 containers) | 66 (6 containers) | 154 | | |
 | Series, estimated once deployed (+ `alloy`, `probes`, bpvps1's `backup`, and the textfile series) | ~136 | ~106 | **~242** | 10,000 | **~97.6%** |
-| Synthetic Monitoring series (11 checks × 3 probes) | | | _pending — read `grafanacloud_instance_active_series` after apply_ | | |
+| Synthetic Monitoring series (11 checks × 3 probes + 4 × 1 probe) | | | _pending — read `grafanacloud_instance_active_series` after apply_ | | |
 | Container logs, bytes in the last 24 h — **measured** | 2.0 MB (wordpress 1.6 MB, stalwart 0.36 MB) | 7 KB | ~2 MB/day ≈ **60 MB/month** | 50 GB | **~99.9%** |
 | **Measured in Grafana Cloud, 2026-09-15** (1 day, see above) | 154 | 128 | **1,569 total**, incl. Synthetics and Grafana's own series | 10,000 | **84.3%** |
 | Database Observability (#166), **estimated** — see its section | | ~1,100 | ~1,100 | | _re-read after deploy_ |
@@ -268,7 +269,9 @@ with no other edit. CI fails when:
   `bookingapi.teeko.ai` sat in the registry until 2026-08-31);
 - a router's `${VAR}` has no value under `vars:` in `endpoints.yml`. Those values live in host
   `.env` files; read them with `docker inspect <container>` and its `traefik.*.rule` label;
-- a registry domain is `skip`ped, a skip has no reason, or an entry names no router.
+- a registry domain is `skip`ped, a skip has no reason, or an entry names no router;
+- an `off_platform:` entry (below) has no reason or no platform, names a platform that is a VPS
+  host key, appears under `endpoints:` as well, or names something a router here *does* serve.
 
 ```bash
 python vps/shared/public-endpoints.py        # the names, the host each is on, the URL probed
@@ -289,6 +292,45 @@ database was gone probed as healthy; `/health` runs `SELECT 1` and answers 503 w
 (booking-system#166). This is what makes `endpoint-down` the "API down" alert for booking — see
 "Alerts" above for why there is no second, booking-labelled copy of that rule.
 
+### Names we do not host: `off_platform:` (#37)
+
+booking-system's two frontends are Next.js apps on **Vercel**, so no Traefik router here mentions
+them and nothing can derive them. They are the one thing typed by hand, in a block of their own so
+the derived list stays the source of truth for everything self-hosted. Each entry carries a
+mandatory `reason` and a mandatory `platform` (which becomes the check's `host` label), and may
+override `path`, `probes` and `frequency`.
+
+| Name | Serves | Probed at | Why this URL |
+|---|---|---|---|
+| `www.reservetoday.app` | fe-client, production | `/` | `www` is a reserved non-Tenant label, so it names no studio |
+| `www.dev.reservetoday.app` | fe-client, staging | `/` | same; the bare `dev.reservetoday.app` has **no DNS record** |
+| `admin.portal.reservetoday.app` | fe-portal, production | `/platform` | the super portal — `admin` is a label the app recognises, not a studio |
+| `admin.portal.dev.reservetoday.app` | fe-portal, staging | `/platform` | same |
+
+**No check URL may contain a studio slug.** fe-client is served at `{slug}.reservetoday.app`, and
+booking-system's `CLAUDE.md` forbids a real studio's name in any file. It does not have to: `www`,
+`staging`, `app` and `admin` are reserved labels that no Tenant can ever hold, so these four URLs
+are permanently slug-free. `/` on the portal answers 307 → `/platform`; `/platform` is probed
+directly, so the check asserts the page renders rather than that a redirect exists.
+
+> ⚠️ **What a green frontend check does not mean.** The client's no-Tenant page asks the API for
+> nothing — by design: a hostname naming no Tenant carries no Tenant context, so it may serve only
+> pages that need none. So `www…` green means *Vercel is serving the deployment*, not *a studio's
+> booking page works*. Tenant resolution, the API and the database are what the `api.*` `/health`
+> checks cover. Closing that gap needs a slug-free route on fe-client that exercises one real
+> Tenant lookup without naming it — a booking-system ticket, not this repository.
+
+**One probe, not three.** Grafana Cloud free allows 100,000 check executions a month, counted per
+probe per run; a 30-day month is 43,200 minutes, so one name from one probe every 60 s is 43,200
+executions. The derived checks are already `11 × 3 × 43,200 = 1,425,600`/month — **14× the free
+tier before these four exist**, so there is no spare budget to fit them into. They therefore run
+from **Singapore only**: `4 × 1 × 43,200 = 172,800`/month, against `518,400` at three probes.
+The full arithmetic, and why the interval is *not* the knob that was turned (the `endpoint-down`
+window is two minutes and Synthetic Monitoring's push lag is ~1 minute, so anything slower than
+60 s makes the alert flicker instead of fire), is recorded in `grafana/synthetic/endpoints.yml`.
+The account is on a Pro trial, so nothing is throttled today — **read Synthetics usage at the
+account before the trial ends and decide the cadence of all fifteen there.**
+
 **Who renews each certificate** — where to look when `tls-expiry` fires:
 
 | Names | Certificate from |
@@ -297,6 +339,7 @@ database was gone probed as healthy; `/health` runs `SELECT 1` and answers 503 w
 | `mail.`/`webmail.` `kaiteki.my` and `blueprintdigital.my` | `vps/bpvps1/stacks/stalwart/renew-cert.sh` (acme.sh, DNS-01) |
 | `webmail.reservetoday.app` | bpvps1 Traefik, `le-tls` (TLS-ALPN-01) — the record must stay DNS-only on Vercel |
 | `api.reservetoday.app`, `api.dev.reservetoday.app` | bpvps2 Traefik, `le-tls` (TLS-ALPN-01) — [`tls-wildcard-constraint.md`](tls-wildcard-constraint.md) |
+| the four `off_platform:` frontend names | **Vercel**, automatically, for the `*.reservetoday.app` / `*.portal[.dev].reservetoday.app` wildcards. Nothing here renews them; `tls-expiry` on one of these is a Vercel problem, not an `acme.sh` one |
 
 ## Mail ports: probed from bpvps2
 
@@ -404,9 +447,22 @@ missing `app: booking` is not silent — it arrives in the infra channel, which 
 and harder to notice than silence. Every rule in `grafana/rules/booking.yml` carries
 `app: booking` in its static `labels:`, beside `severity`.
 
-The one booking alert that lands in the **infra** channel on purpose is `endpoint-down` for
-`api.dev.reservetoday.app` / `api.reservetoday.app`: it is an endpoint rule covering every public
-name, so it carries no `app` label. See "Alerts", above.
+The booking alerts that land in the **infra** channel on purpose are every `endpoint-down` over a
+booking name — `api.dev.reservetoday.app` / `api.reservetoday.app`, and since #37 the four
+`off_platform:` frontend names. `endpoint-down` is one rule covering every public name, so it
+carries no `app` label. See "Alerts", above.
+
+**Why the frontend checks did not get `app: booking` (#37).** A label is a property of a *rule*,
+not of a series, and `endpoint-down` is a single rule over every `probe_success` series. There is
+no way to label four of its instances and not the other eleven. Routing a frontend outage to
+`#booking` would mean a second, job-scoped copy of a rule whose window, `for`, `noDataState` and
+probe-consensus reading were all argued out once — two rules over the same series, two Discord
+messages per outage, two thresholds to keep in step. `grafana/rules/booking.yml` §3 already
+refused exactly that trade for the booking **API**, which is the louder of the two. The frontends
+follow the API rather than invent a third answer: infra channel, no `app` label. If per-app
+routing for endpoint checks is ever wanted, the honest fix is to make `endpoint-down` carry the
+app as a label on the **check** (`sm_check_info`) and route on that — a change to the rule and to
+`grafana-apply.py`, not four hand-labelled duplicates.
 
 **Order in the tree is load-bearing.** Grafana stops at the first matching sibling policy, and
 every app alert also carries a `severity`, so the `app` routes sit *above* the severity routes; an
@@ -504,7 +560,7 @@ says which (`docker` → `container-restarting`, `postgres` → `postgres-connec
 **`series-budget`** — something new is expensive.
 1. Explore → `grafanacloud-prom`: `topk(10, count by (__name__) ({__name__=~".+"}))`.
 2. The last change to a `metrics.allowlist`, or a new container on several networks.
-3. The Synthetic Monitoring checks count too: 11 names × 3 probes.
+3. The Synthetic Monitoring checks count too: 11 names × 3 probes, plus 4 off-platform × 1.
 
 **`textfile-canary-stale`** — only expected during the seam test. Delete `canary.prom`.
 
@@ -683,5 +739,6 @@ window** agreed in advance, and is recorded here.
 | Textfile seam | [`textfile-metrics.md`](textfile-metrics.md), "Testing the seam" — no window needed. Pass: value queryable within a minute; `textfile-canary-stale` fires when left, resolves when refreshed | **Pass, 2026-09-14 on bpvps2** (times UTC). Written 14:04:44, queryable 14:05:44 — 60 s, one scrape interval. Left to age: `Pending` 14:10:32, **`Alerting` 14:11:34 — 6 min 50 s after the write**, ~50 s later than the documented 5 min + 1 min, which is scrape/evaluation alignment, not a missed alert. Rewritten 14:11:46, back to `Normal` 14:13:30 (1 min 44 s). `canary.prom` deleted 14:13:39; series gone and the rule inert by 14:14:55 |
 | Backup heartbeat (#27) | Blocked on the seam; run right after it. [`backup-restore.md`](backup-restore.md) | **Negative case observed live, 2026-09-14** — not simulated: bpvps1's backup stack deployed today and its first run is 04:30 KL, so it has no heartbeat yet. `count by (host) (backup_last_success_timestamp_seconds)` returns **bpvps2 only** (1 target, `booking-staging`); bpvps1 has no series. "Backup heartbeat stale on bpvps1" is **firing**, `Alerting` since 13:44:10 UTC — the absence half of the rule, exactly as intended. "Backup heartbeat stale on bpvps2" is **inactive** (`Normal (NoData)` = the query returns nothing, which is health). One host red, one green, each for the right reason. _The positive case — a real heartbeat on bpvps1 going stale and resolving — still needs the first 04:30 run._ |
 | TLS days vs `openssl` | Dashboard **Endpoints** → *TLS days left* for `api.reservetoday.app`, against `echo \| openssl s_client -servername api.reservetoday.app -connect api.reservetoday.app:443 2>/dev/null \| openssl x509 -noout -enddate`. Pass: same day count. `openssl` side on 2026-09-14: `notAfter=Nov 7 15:40:49 2026 GMT` (≈54 days) | **Pass, 2026-09-14.** `probe_ssl_earliest_cert_expiry{job="api.reservetoday.app"}` = `1794066049` from all three probes (Singapore, Tokyo, Mumbai) = **Nov 7 15:40:49 2026 UTC**, ≈54.1 days left — **identical to the second** to `openssl`'s `notAfter`. Checked against the raw metric, not the dashboard panel |
-| Every name has a check | `python vps/shared/public-endpoints.py` lists 11 names; **Synthetics → Checks** shows the same 11 after apply | repo side: 11 names, all answering on 2026-09-14. Account side _pending_ |
+| Every name has a check | `python vps/shared/public-endpoints.py` lists 15 names; **Synthetics → Checks** shows the same 15 after apply | repo side: 11 derived names, all answering on 2026-09-14; 4 off-platform frontend names added and answering on 2026-09-20 (#37). Account side _pending_ |
+| Off-platform checks exist after apply (#37) | **Synthetics → Checks**: the four `*.reservetoday.app` frontend jobs, each from **Singapore only**, `host=vercel` | _pending the first apply_ |
 | Budget after a week | "Budget" above | _pending a week of data_ |

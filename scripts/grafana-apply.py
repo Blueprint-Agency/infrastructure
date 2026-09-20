@@ -3,8 +3,10 @@
 
 Apply the repository's Grafana objects to Grafana Cloud: every dashboard under
 grafana/dashboards/, every alert rule group under grafana/rules/, and one Synthetic Monitoring
-check per public endpoint derived by vps/shared/public-endpoints.py (#24), plus the contact
-points and notification policy in grafana/alerting/notifications.yml. The files are the
+check per public endpoint derived by vps/shared/public-endpoints.py (#24) -- every Traefik
+router here, plus the hand-typed `off_platform:` names that something else serves
+(booking-system's Vercel frontends, #37), which may set their own probes and frequency --
+plus the contact points and notification policy in grafana/alerting/notifications.yml. The files are the
 copy of record (#22) -- a dashboard or rule that exists only in the web UI has no history and no
 review, and anything edited there is overwritten by the next apply.
 
@@ -106,11 +108,19 @@ def probe_ids(names, probes):
 
 
 def sm_check(endpoint, probes):
-    """derived endpoint {hostname, host, url} -> Synthetic Monitoring HTTP check body"""
+    """derived endpoint {hostname, host, url} -> Synthetic Monitoring HTTP check body
+
+    An off_platform endpoint (grafana/synthetic/endpoints.yml, #37) may carry `probe_ids` and
+    `frequency` of its own -- fewer probes buy free-tier headroom for a name whose alert is
+    "read the provider's status page" rather than "ssh the host". Everything derived from a
+    Traefik router takes the file-wide values, and grafana/rules/endpoints.yml's 2-minute
+    window assumes the 60s default: see that file's budget note before overriding frequency.
+    """
     return {
         "job": endpoint["hostname"], "target": endpoint["url"],
-        "frequency": seconds(SM_FREQUENCY) * 1000, "timeout": seconds(SM_TIMEOUT) * 1000,
-        "enabled": True, "probes": list(probes),
+        "frequency": seconds(endpoint.get("frequency") or SM_FREQUENCY) * 1000,
+        "timeout": seconds(SM_TIMEOUT) * 1000,
+        "enabled": True, "probes": list(endpoint.get("probe_ids") or probes),
         "labels": [{"name": "host", "value": endpoint["host"]},
                    {"name": "managed_by", "value": SM_MANAGED_BY}],
         # The TLS and success metrics the rules and dashboard read are all basic metrics.
@@ -248,7 +258,10 @@ def main():
         for d in dashboards:
             print(f"dashboard {d['uid']}: {len(d.get('panels') or [])} panels -> {folder_uid(DASHBOARD_FOLDER)}")
         for e in endpoints:
-            print(f"synthetic check {e['hostname']}: {e['url']} (host {e['host']}) from {', '.join(probe_names)}")
+            where = "off-platform" if e.get("off_platform") else f"host {e['host']}"
+            print(f"synthetic check {e['hostname']}: {e['url']} ({where}, label host={e['host']}) "
+                  f"every {e.get('frequency') or SM_FREQUENCY} "
+                  f"from {', '.join(e.get('probes') or probe_names)}")
         # resolve=False: never print a webhook URL, which is a credential.
         points, tree = notifications(notif, resolve=False)
         for p in points:
@@ -263,9 +276,15 @@ def main():
         sys.exit(f"{', '.join(missing)} not set -- `set -a; . ./.env; set +a` first")
     api = Grafana(os.environ["GRAFANA_URL"], os.environ["GRAFANA_SA_TOKEN"])
     sm = Grafana(os.environ["GRAFANA_SM_URL"].rstrip("/") + "/api/v1", os.environ["GRAFANA_SM_TOKEN"])
-    # Resolve probes before touching anything, so a bad name changes nothing.
+    # Resolve probes before touching anything, so a bad name changes nothing -- the file-wide
+    # list, and then any per-endpoint override, so a typo in one off_platform entry fails the
+    # run before a single check, rule or dashboard has been written.
     try:
-        probes = probe_ids(probe_names, sm.call("GET", "/probe/list"))
+        available = sm.call("GET", "/probe/list")
+        probes = probe_ids(probe_names, available)
+        for e in endpoints:
+            if e.get("probes"):
+                e["probe_ids"] = probe_ids(e["probes"], available)
     except ValueError as exc:
         sys.exit(f"grafana/synthetic/endpoints.yml: {exc}")
 
@@ -306,7 +325,8 @@ def main():
         print(f"synthetic check {body['job']}: updated")
     for check in delete:
         sm.call("DELETE", f"/check/delete/{check['id']}")
-        print(f"synthetic check {check['job']}: deleted -- no router serves it any more")
+        print(f"synthetic check {check['job']}: deleted -- no router serves it and no "
+              "off_platform entry declares it any more")
     return 0
 
 

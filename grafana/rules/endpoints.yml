@@ -10,6 +10,21 @@
 # (instance, job) keeps the join one-to-one even while a changed host label's old series is
 # still fresh -- without it the join errors for ~5 min and the rule reads Error, not firing.
 # Silences and summaries then use host=bpvps1 / host=bpvps2, the same label as every other rule.
+#
+# Both rules below read every job, with no host matcher, so the off_platform checks (#37 --
+# booking-system's Vercel frontends, which no router here serves) inherit them with no edit;
+# their `host` label is `vercel`, their platform, rather than a VPS key. Adding a host matcher to
+# either rule would silently stop alerting on every one of them: vps/shared/check-monitoring.py
+# fails the build if anyone does.
+#
+# Those four run from ONE probe, not three, to buy free-tier headroom (the arithmetic is in
+# grafana/synthetic/endpoints.yml). For them "every probe failed" means that one probe, so a
+# Singapore-to-Vercel network fault is a page -- a trade taken because their remedy is "read
+# Vercel's status page", not "ssh the host". They keep the 60s frequency the 2m window assumes.
+#
+# NO `app` label, deliberately, including for the booking names: one rule cannot label four of
+# its instances and not the other eleven, and grafana/rules/booking.yml §3 already refused a
+# second copy of this rule for the booking API. docs/monitoring.md, "Where an alert lands".
 apiVersion: 1
 groups:
   - orgId: 1
@@ -74,7 +89,10 @@ groups:
             Every Grafana probe has failed at least two runs in a row against {{ $labels.instance }}.
             If every name on {{ $labels.host }} fires together, suspect Traefik or the host:
             `ssh bp-{{ $labels.host }} 'docker ps; docker logs --tail 50 traefik'`. One name alone:
-            its container, its router rule, or its DNS record. Runbook: docs/monitoring.md.
+            its container, its router rule, or its DNS record. If {{ $labels.host }} is not one of
+            bpvps1/bpvps2 it is an off-platform name (grafana/synthetic/endpoints.yml,
+            off_platform:) -- nothing here serves it and there is nothing to ssh; read that
+            provider's status page. Runbook: docs/monitoring.md.
 
       # Renewal fails silently: a TLS-ALPN-01 record flipped to proxied, a token scoped to the
       # wrong zone, acme.sh keyed on a renamed primary. Every renewal here runs at 30 days left,

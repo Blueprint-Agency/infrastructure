@@ -6,11 +6,18 @@
 # against apps/registry.yml. A new router is a new check with no edit here. What lives here is
 # only what the repository cannot know:
 #
-#   vars       values of ${VARS} in router rules that come from host .env files, never committed.
-#              Key "*" applies everywhere; "<host>/<stack dir>" to one destination (fanout-aware).
-#              Read off the hosts with `docker inspect` on 2026-09-14.
-#   endpoints  per-name exceptions: `path` to probe instead of /, or `skip: <reason>`.
-#              A registry domain can never be skipped; CI fails it.
+#   vars          values of ${VARS} in router rules that come from host .env files, never
+#                 committed. Key "*" applies everywhere; "<host>/<stack dir>" to one destination
+#                 (fanout-aware). Read off the hosts with `docker inspect` on 2026-09-14.
+#   endpoints     per-name exceptions to the DERIVED list: `path` to probe instead of /, or
+#                 `skip: <reason>`. A registry domain can never be skipped; CI fails it.
+#   off_platform  names this repository does not host at all and no router here serves, typed
+#                 by hand because nothing can derive them (#37). Each one carries a `reason`
+#                 and the `platform` that serves it, both mandatory -- CI fails an entry
+#                 missing either. Kept a SEPARATE block, not a row in `endpoints:`, so the
+#                 derived list stays the single source of truth for everything self-hosted:
+#                 a name under `off_platform` that a router here does serve is an error, and
+#                 so is a name under both blocks.
 #
 # Apply: scripts/grafana-apply.py. Runbook: docs/monitoring.md, "External checks".
 
@@ -49,3 +56,108 @@ endpoints:
     skip: router exists but the name has no DNS record -- not public
   traefik-bpvps2.teeko.ai:
     skip: router exists but the name has no DNS record -- not public
+
+# ── Off-platform names ───────────────────────────────────────────────────────────────────────
+# booking-system's two frontends are Next.js apps on Vercel (booking-system/docs/md/deployment.md),
+# so no Traefik router on bpvps1 or bpvps2 mentions them and nothing here can derive them.
+# booking-system#166 asks for one check per frontend against a public page; #37 is that work.
+#
+# Per entry:
+#   reason     REQUIRED. Who serves it and why the derived list cannot. CI fails without one,
+#              exactly like `skip:` -- an untyped exception rots, a reasoned one is reviewable.
+#   platform   REQUIRED. Becomes the check's `host` label, which is what every alert prints
+#              ("{{ $labels.job }} on {{ $labels.host }}") and what silences match on. It may
+#              not be a key in vps/hosts.json: `host=bpvps2` on a name bpvps2 does not serve
+#              would send someone to ssh a host that is fine.
+#   path       optional, default /.
+#   probes     optional, overriding the file-wide `probes:` above. See the budget below.
+#   frequency  optional, default 60s. ⚠️ grafana/rules/endpoints.yml reads
+#              max_over_time(probe_success[2m]) and Synthetic Monitoring's push lag is ~1m, so
+#              anything longer than 60s leaves that window empty at most evaluations and the
+#              alert instance appears and vanishes instead of firing. Lengthening it means
+#              rewriting that rule's window first. This is why the budget below buys its
+#              headroom with FEWER PROBES and not with a longer interval.
+#
+# ── Why these four URLs and no others ────────────────────────────────────────────────────────
+# fe-client is served at {slug}.reservetoday.app, where the slug IS a studio, and
+# booking-system/CLAUDE.md forbids any real studio's name in any file. So the probe URL may not
+# contain a slug. It does not have to: `www`, `staging`, `app` and `admin` are reserved labels
+# (NON_TENANT_LABELS in fe-client/src/lib/tenant-host.ts, mirroring the backend's reserved-slug
+# list, which refuses them at Tenant creation) -- no Tenant can ever hold one, so
+# `www.reservetoday.app` is permanently slug-free and serves the client's no-Tenant page. Its
+# staging twin is `www.dev.reservetoday.app`; the bare `dev.reservetoday.app` has no DNS record.
+# Both answered 200 on 2026-09-20.
+#
+# fe-portal's slug-free name is the super portal, `admin.portal[.dev].reservetoday.app` --
+# `admin` is a label the app recognises (isSuperPortalHost), not a Vercel domain row. `/`
+# answers 307 to `/platform`; redirects are followed (grafana-apply.py: noFollowRedirects
+# false) and `/platform` answers 200 signed out, so `/platform` is probed directly: one hop
+# fewer, and the assertion is that the page renders rather than that a redirect exists.
+#
+# ⚠️ WHAT THESE CHECKS DO NOT COVER, written down rather than discovered at 2am. The client's
+# no-Tenant page asks the API for nothing -- by design: a hostname naming no Tenant carries no
+# Tenant context, so it may serve only pages that need none (fe-client/src/proxy.ts). So a
+# green www check means "Vercel is serving the deployment", NOT "a studio's booking page
+# works". Tenant resolution, the API and the database are covered by the api.* /health checks
+# above. Closing the gap needs a slug-free route on fe-client that exercises one real Tenant
+# lookup without naming it -- a booking-system ticket, not this file.
+#
+# ── Free-tier budget ─────────────────────────────────────────────────────────────────────────
+# Grafana Cloud free allows 100,000 Synthetic Monitoring API-test executions a month, and an
+# execution is counted PER PROBE PER RUN. A 30-day month is 43,200 minutes, so one check from
+# one probe every 60s is 43,200 executions -- 43% of the whole allowance.
+#
+#   derived checks today   11 names x 3 probes x 43,200 =  1,425,600 /month
+#   + frontends at 3 probes 4 names x 3 probes x 43,200 =    518,400 /month
+#   + frontends as written  4 names x 1 probe  x 43,200 =    172,800 /month
+#   total as written                                     =  1,598,400 /month  (16x the allowance)
+#
+# ⚠️ The arithmetic's real finding: the DERIVED checks alone are already 14x the free tier, so
+# there is no remaining budget to fit these four into -- the honest number is negative, not
+# spare. #37's "under the free tier alongside the existing checks" cannot be met by choosing a
+# cadence for four names; it needs a decision about the cadence of all fifteen, which #24 timed
+# deliberately ("a phone within five minutes") and this issue does not get to overturn. The
+# account is on a Pro trial (docs/monitoring.md, "Grafana Cloud entitlements"), so nothing is
+# being throttled today; read Synthetics usage at the account before the trial ends and decide
+# there. Recorded here so the next person does not rediscover it.
+#
+# What #37 CAN do is not make it materially worse, which is the one probe below: Singapore,
+# nearest the users. The cost is that `endpoint-down`'s "every probe failed" degenerates to
+# "this probe failed twice in a row", so a Singapore-to-Vercel network fault is a page. That
+# trade is acceptable HERE and nowhere else: these alerts are "read Vercel's status page", not
+# "ssh the host", and a probe-local fault between Singapore and Vercel's edge is roughly what a
+# user in that region sees anyway. The self-hosted names keep all three.
+off_platform:
+  www.reservetoday.app:
+    reason: >-
+      fe-client production -- Next.js on Vercel (project booking-system, wildcard
+      *.reservetoday.app), so no Traefik router here serves it and it cannot be derived.
+      `www` is a reserved non-Tenant label, so this URL names no studio.
+    platform: vercel
+    path: /
+    probes: [Singapore]
+
+  www.dev.reservetoday.app:
+    reason: >-
+      fe-client staging -- the same Vercel project's `staging` branch on wildcard
+      *.dev.reservetoday.app. The bare dev.reservetoday.app has no DNS record.
+    platform: vercel
+    path: /
+    probes: [Singapore]
+
+  admin.portal.reservetoday.app:
+    reason: >-
+      fe-portal production -- Next.js on Vercel (project booking-system-admin, wildcard
+      *.portal.reservetoday.app). `admin` is the super portal label, not a studio, so this is
+      the one slug-free page the staff app has.
+    platform: vercel
+    path: /platform
+    probes: [Singapore]
+
+  admin.portal.dev.reservetoday.app:
+    reason: >-
+      fe-portal staging -- the same Vercel project's `staging` branch on wildcard
+      *.portal.dev.reservetoday.app.
+    platform: vercel
+    path: /platform
+    probes: [Singapore]
