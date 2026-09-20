@@ -9,6 +9,8 @@ the failures, because each is a way monitoring rots without anyone noticing:
   - a panel or rule reading a metric not allowlisted -> an empty panel, a rule that never fires
   - a container in a compose file the down-alert does not declare -> it can die silently
   - a down-alert selector without the host matcher  -> an alert that names the wrong instance
+  - an off-platform check with no rule to alert it  -> a name probed and watched by nobody
+  - an endpoint rule pinned to host="<vps>"         -> the same, with the file looking correct
 
 The last case runs the checker against this repository itself.
 """
@@ -318,6 +320,50 @@ expect("agent config drifted between hosts",
 missing = two_hosts()
 (missing / "vps/h2/stacks/monitoring/probes/bin/lib.sh").unlink()
 expect("probe script missing on one host", missing, 1, "monitoring drift", "probes/bin/lib.sh", "missing on h2")
+
+# ── Off-platform checks (#37) ────────────────────────────────────────────────────────────────
+# booking-system's frontends are on Vercel, so their checks carry host: vercel rather than a VPS
+# key. They are alerted on only by the two rules that read every job -- and only for as long as
+# nobody pins those rules to a host.
+OFF_PLATFORM = """
+    off_platform:
+      www.vendor.example:
+        reason: the marketing site, served by a PaaS -- no router here has it
+        platform: paas
+"""
+ENDPOINT_RULES = heartbeat(
+    ["endpoint-down", "tls-expiry"],
+    "max by (instance, job) (max_over_time(probe_success[2m]))",
+    "min by (instance, job) (probe_ssl_earliest_cert_expiry) - time()")
+
+expect("off-platform name with the rules that cover it",
+       base(**{"grafana/synthetic/endpoints.yml": OFF_PLATFORM,
+               "grafana/rules/endpoints.yml": ENDPOINT_RULES}), 0)
+
+# No file, or no off_platform block: nothing to check, and the absence is not a failure.
+expect("no synthetic config at all", base(), 0)
+expect("synthetic config with no off_platform block",
+       base(**{"grafana/synthetic/endpoints.yml": "probes: [Singapore]\n"}), 0)
+
+expect("off-platform name with no endpoint rules",
+       base(**{"grafana/synthetic/endpoints.yml": OFF_PLATFORM}), 1,
+       "endpoint-down", "never alerted")
+
+expect("off-platform name with no tls rule",
+       base(**{"grafana/synthetic/endpoints.yml": OFF_PLATFORM,
+               "grafana/rules/endpoints.yml": heartbeat(
+                   ["endpoint-down"], "max by (instance, job) (max_over_time(probe_success[2m]))")}),
+       1, "tls-expiry", "never alerted")
+
+# The failure that looks fine in review: someone quietens a VPS by adding a host matcher, and
+# every name that host does not serve silently stops being alerted on.
+expect("endpoint rule pinned to a VPS host",
+       base(**{"grafana/synthetic/endpoints.yml": OFF_PLATFORM,
+               "grafana/rules/endpoints.yml": heartbeat(
+                   ["endpoint-down", "tls-expiry"],
+                   'max by (instance, job) (max_over_time(probe_success{host="h1"}[2m]))',
+                   "min by (instance, job) (probe_ssl_earliest_cert_expiry) - time()")}),
+       1, 'host="h1"', "paas", "www.vendor.example")
 
 expect("this repository", REPO, 0)
 

@@ -10,6 +10,8 @@ up unwatched:
   - a router name whose ${VAR} has no value              -> a name we cannot probe
   - a registry domain skipped                            -> a registry domain with no check
   - a skip with no reason, or an entry for no router     -> exceptions that rot
+  - an off_platform entry with no reason or no platform  -> a hand-typed name nobody can review
+  - an off_platform name a router here DOES serve        -> a hand-typed copy of a derived one
 
 The last case runs the checker against this repository itself.
 """
@@ -89,6 +91,17 @@ ENDPOINTS = """
         skip: router exists but the name has no DNS record
       mail.example.com:
         path: /account
+"""
+
+# A name nothing here serves, typed by hand because nothing can derive it (#37).
+OFF = """
+    off_platform:
+      www.vendor.example:
+        reason: the marketing site, served by a PaaS -- no router here has it
+        platform: paas
+        path: /status
+        probes: [Singapore]
+        frequency: 300s
 """
 
 
@@ -190,6 +203,68 @@ expect("registry vps as a list on an in-scope host",
        repo(**{"apps/registry.yml": REGISTRY + "      - name: tool\n        vps: [h1]\n"
                                                "        domain: {production: tool.example.com}\n"}),
        1, "tool", "list")
+
+# ── off_platform (#37) ───────────────────────────────────────────────────────────────────────
+# A declared off-platform name becomes a check like any other, with the platform as its `host`
+# label and its own probes and frequency. Everything derived is untouched.
+expect("off-platform name declared", repo(**{"grafana/synthetic/endpoints.yml": ENDPOINTS + OFF}), 0,
+       "off-platform")
+rc, out = run(repo(**{"grafana/synthetic/endpoints.yml": ENDPOINTS + OFF}), "--json")
+assert rc == 0, out
+checks = {c["hostname"]: c for c in json.loads(out)}
+assert "www.vendor.example" in checks, sorted(checks)
+off = checks["www.vendor.example"]
+assert off["host"] == "paas" and off["url"] == "https://www.vendor.example/status", off
+assert off["probes"] == ["Singapore"] and off["frequency"] == "300s" and off["off_platform"] is True, off
+# The derived ones keep the file-wide probes and frequency -- no key of their own to override with.
+assert "probes" not in checks["example.com"] and "off_platform" not in checks["example.com"]
+
+# The reason is the whole point of the block: without it nobody can review, years later, why a
+# name nothing here serves is being probed from our budget. Same rule as skip:.
+expect("off-platform without a reason",
+       repo(**{"grafana/synthetic/endpoints.yml": ENDPOINTS + OFF.replace(
+           "reason: the marketing site, served by a PaaS -- no router here has it", "reason: ''")}),
+       1, "www.vendor.example", "reason")
+expect("off-platform with no reason key at all",
+       repo(**{"grafana/synthetic/endpoints.yml": ENDPOINTS + """
+    off_platform:
+      www.vendor.example:
+        platform: paas
+"""}), 1, "www.vendor.example", "reason")
+
+# The platform becomes the check's `host` label, which is what every alert prints and every
+# silence matches. Blank, and the alert says "www.vendor.example on ".
+expect("off-platform without a platform",
+       repo(**{"grafana/synthetic/endpoints.yml": ENDPOINTS + OFF.replace("platform: paas", "platform: ''")}),
+       1, "www.vendor.example", "platform")
+
+# ...and it must not be a VPS host key, or `endpoint-down` sends someone to ssh a healthy box.
+expect("off-platform platform naming a VPS host",
+       repo(**{"grafana/synthetic/endpoints.yml": ENDPOINTS + OFF.replace("platform: paas", "platform: h1")}),
+       1, "www.vendor.example", "vps/hosts.json")
+
+# A name a router here DOES serve is derived already. Keeping a hand-typed copy means two
+# declarations that will disagree, and the hand-typed one is the one that rots.
+expect("off-platform name a router serves",
+       repo(**{"grafana/synthetic/endpoints.yml": ENDPOINTS + OFF.replace(
+           "www.vendor.example", "example.com")}),
+       1, "example.com", "router on h1")
+
+# One name, one declaration.
+expect("name under both blocks",
+       repo(**{"grafana/synthetic/endpoints.yml": ENDPOINTS + "      mail.alias.com:\n        path: /\n"
+                                                  + OFF.replace("www.vendor.example", "mail.alias.com")}),
+       1, "mail.alias.com", "both")
+
+# The knobs are typed: a frequency the apply script cannot parse, or probes that are not a list
+# of names, would each fail at apply time instead of in CI.
+expect("off-platform frequency that is not a duration",
+       repo(**{"grafana/synthetic/endpoints.yml": ENDPOINTS + OFF.replace("frequency: 300s", "frequency: 5")}),
+       1, "www.vendor.example", "frequency")
+expect("off-platform probes that are not a list",
+       repo(**{"grafana/synthetic/endpoints.yml": ENDPOINTS + OFF.replace(
+           "probes: [Singapore]", "probes: Singapore")}),
+       1, "www.vendor.example", "probes")
 
 expect("this repository", REPO, 0)
 

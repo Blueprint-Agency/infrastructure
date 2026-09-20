@@ -7,6 +7,11 @@ cross-checked against apps/registry.yml. grafana/synthetic/endpoints.yml holds o
 repository cannot know: the values of ${VARS} that live in host .env files, and per-name
 exceptions (a path to probe, or a skip with its reason).
 
+One thing is not derivable at all: a name we are responsible for that we do not host, so no
+router here mentions it -- booking-system's two Vercel frontends (#37). Those are typed by hand
+under `off_platform:`, each with a mandatory reason and the platform that serves it, in a block
+of their own so the derived list stays the source of truth for everything self-hosted.
+
 A host is in scope unless vps/hosts.json declares it `no_backups: <reason>` -- the Teeko hosts,
 out of scope for backups and monitoring alike (#4, #22).
 
@@ -14,7 +19,10 @@ Fails when:
   - a registry domain on an in-scope host is served by no router on that host (drift);
   - a router's ${VAR} has no value in endpoints.yml (a name nobody can probe);
   - a registry domain is skipped (every registry domain has a check);
-  - a skip has no reason, or an endpoints.yml entry names no router (exceptions that rot).
+  - a skip has no reason, or an endpoints.yml entry names no router (exceptions that rot);
+  - an off_platform entry has no reason or no platform, names a platform that is a VPS host
+    key, is also under endpoints:, or names something a router here DOES serve (in which case
+    it is derived already and the hand-typed copy is the one that will rot).
 
 Usage: public-endpoints.py [repo-root] [--json]
   exit 0 clean, 1 problems found. --json prints the checks scripts/grafana-apply.py creates.
@@ -108,11 +116,65 @@ def registry_domains(in_scope, problems):
     return out
 
 
+CONFIG = "grafana/synthetic/endpoints.yml"
+DURATION = re.compile(r"[0-9]+[smh]")
+
+
+def url_for(name, path):
+    path = str(path or "/")
+    return f"https://{name}{path if path.startswith('/') else '/' + path}"
+
+
+def off_platform_checks(entries, served, overrides, host_keys, problems):
+    """The hand-typed half: names nothing here serves, so nothing here can derive them (#37).
+
+    Every failure below is a way one of these rots unnoticed -- an exception with no stated
+    reason, a `host` label that sends someone to ssh a machine that is fine, or a duplicate of
+    a name the derived list already covers and will keep covering after this entry goes stale.
+    """
+    checks = []
+    for name, entry in sorted(entries.items()):
+        entry = entry or {}
+        where = f"{CONFIG}: {name}"
+        if not str(entry.get("reason") or "").strip():
+            problems.append(f"{where}: off_platform needs a reason -- say who serves it and why no "
+                            "router here does, the same way skip: does")
+        platform = str(entry.get("platform") or "").strip()
+        if not platform:
+            problems.append(f"{where}: off_platform needs platform: <who serves it> -- it becomes the "
+                            "check's `host` label, which every alert and every silence names")
+        elif platform in host_keys:
+            problems.append(f"{where}: platform: {platform} is a host in vps/hosts.json, which does not "
+                            "serve this name -- the alert would send someone to ssh a healthy machine")
+        if name in served:
+            problems.append(f"{where}: is served by a router on {served[name]} -- it is derived already; "
+                            "delete the off_platform entry rather than keep a hand-typed copy")
+        if name in overrides:
+            problems.append(f"{where}: is under both endpoints: and off_platform: -- one name, one "
+                            "declaration, or the two will disagree")
+        if entry.get("frequency") is not None and not DURATION.fullmatch(str(entry["frequency"])):
+            problems.append(f"{where}: frequency {entry['frequency']!r} -- expected e.g. 60s, 5m")
+        probes = entry.get("probes")
+        if probes is not None and not (isinstance(probes, list) and probes
+                                       and all(isinstance(p, str) and p.strip() for p in probes)):
+            problems.append(f"{where}: probes must be a non-empty list of probe names, or absent to "
+                            f"use the file-wide probes: -- got {probes!r}")
+        check = {"hostname": name, "host": platform, "url": url_for(name, entry.get("path")),
+                 "off_platform": True}
+        if isinstance(probes, list) and probes:
+            check["probes"] = [str(p) for p in probes]
+        if entry.get("frequency") is not None:
+            check["frequency"] = str(entry["frequency"])
+        checks.append(check)
+    return checks
+
+
 def derive(problems):
-    """-> [check] where a check is {hostname, host, url}."""
-    config = pathlib.Path("grafana/synthetic/endpoints.yml")
+    """-> [check] where a check is {hostname, host, url} and, off-platform only, probes/frequency."""
+    config = pathlib.Path(CONFIG)
     doc = load_yaml(config) if config.is_file() else {}
     variables, overrides = doc.get("vars") or {}, doc.get("endpoints") or {}
+    off = doc.get("off_platform") or {}
     hosts = json.loads(pathlib.Path("vps/hosts.json").read_text(encoding="utf-8"))
     in_scope = {h["key"]: h for h in hosts if not h.get("no_backups")}
 
@@ -133,23 +195,21 @@ def derive(problems):
     for name, entry in sorted(overrides.items()):
         entry = entry or {}
         if name not in served:
-            problems.append(f"grafana/synthetic/endpoints.yml: {name} is served by no router on an "
-                            "in-scope host -- remove the entry")
+            problems.append(f"{CONFIG}: {name} is served by no router on an in-scope host -- "
+                            "remove the entry, or declare it under off_platform: with a reason")
         if "skip" in entry and not str(entry["skip"] or "").strip():
-            problems.append(f"grafana/synthetic/endpoints.yml: {name}: skip needs a reason")
+            problems.append(f"{CONFIG}: {name}: skip needs a reason")
         if "skip" in entry and name in registered:
-            problems.append(f"grafana/synthetic/endpoints.yml: {name} is a domain in apps/registry.yml "
-                            "and cannot be skipped -- every registry domain has a check")
+            problems.append(f"{CONFIG}: {name} is a domain in apps/registry.yml and cannot be "
+                            "skipped -- every registry domain has a check")
 
     checks = []
     for name in sorted(served):
         entry = overrides.get(name) or {}
         if "skip" in entry:
             continue
-        path = str(entry.get("path") or "/")
-        checks.append({"hostname": name, "host": served[name],
-                       "url": f"https://{name}{path if path.startswith('/') else '/' + path}"})
-    return checks
+        checks.append({"hostname": name, "host": served[name], "url": url_for(name, entry.get("path"))})
+    return checks + off_platform_checks(off, served, overrides, {h["key"] for h in hosts}, problems)
 
 
 def main():
@@ -166,8 +226,15 @@ def main():
         print(f"{len(problems)} public endpoint problem(s)")
         return 1
     for c in checks:
-        print(f"  {c['host']:8} {c['url']}")
-    print(f"public endpoints: {len(checks)} check(s); every registry domain is served and checked")
+        extra = []
+        if c.get("probes"):
+            extra.append(f"probes {', '.join(c['probes'])}")
+        if c.get("frequency"):
+            extra.append(f"every {c['frequency']}")
+        print(f"  {c['host']:8} {c['url']}" + (f"   [{'; '.join(extra)}]" if extra else ""))
+    off = sum(1 for c in checks if c.get("off_platform"))
+    print(f"public endpoints: {len(checks)} check(s), {off} of them off-platform; "
+          "every registry domain is served and checked")
     return 0
 
 
