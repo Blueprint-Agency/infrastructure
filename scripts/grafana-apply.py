@@ -29,9 +29,10 @@ destination or route around a broken one, and waiting on a deploy to do it is wo
 drift. The next apply puts the file's version back.
 
 Any ${VAR} in notifications.yml is substituted from the environment and must be set -- a
-contact point with a blank webhook is accepted by Grafana and then delivers nothing. The
-Discord webhook URL is a credential and this repository is public, so it lives in .env as
-DISCORD_WEBHOOK_URL. --dry-run never resolves it, so it cannot be printed by accident.
+contact point with a blank webhook is accepted by Grafana and then delivers nothing. A Discord
+webhook URL is a credential and this repository is public, so they live in .env: infra in
+DISCORD_WEBHOOK_URL, one channel per app beside it (DISCORD_BOOKING_WEBHOOK_URL). --dry-run
+never resolves them, so none can be printed by accident.
 
 Tested by scripts/test_grafana_apply.py (the translation; no request is made).
 """

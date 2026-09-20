@@ -132,13 +132,51 @@ except SystemExit as exc:
 else:
     raise AssertionError("an unset ${VAR} must fail the run, not send a blank webhook")
 
-# The repository's own notifications file translates, and names a receiver that exists.
+# A nested route translates too: an app's parent route carries the severity tiers under it.
+NESTED = {"contact_points": [{"name": "a", "type": "discord", "settings": {}},
+                             {"name": "b", "type": "discord", "settings": {}}],
+          "policy": {"receiver": "a", "group_by": ["alertname"],
+                     "routes": [{"receiver": "b", "matchers": [["app", "=", "x"]],
+                                 "routes": [{"receiver": "b", "matchers": [["severity", "=", "critical"]],
+                                             "group_wait": "10s"}]}]}}
+_, nested = ga.notifications(NESTED, resolve=False)
+child = nested["routes"][0]["routes"][0]
+assert child["object_matchers"] == [["severity", "=", "critical"]] and child["group_wait"] == "10s"
+
+# The repository's own notifications file translates, and names a receiver that exists --
+# at every depth, since the app routes nest their severity tiers.
 doc = ga.load_yaml(HERE.parent / ga.NOTIFICATIONS)
 names = {cp["name"] for cp in doc["contact_points"]}
 _, real = ga.notifications(doc, resolve=False)
 assert real["receiver"] in names, f"default route names an unknown receiver: {real['receiver']}"
+
+
+def check_receivers(route):
+    assert route["receiver"] in names, f"route names an unknown receiver: {route['receiver']}"
+    for kid in route.get("routes") or []:
+        check_receivers(kid)
+
+
 for r in real.get("routes") or []:
-    assert r["receiver"] in names, f"route names an unknown receiver: {r['receiver']}"
+    check_receivers(r)
+
+# Each Discord channel is its own credential: two contact points must never share one ${VAR},
+# which would deliver both apps' alerts to the same channel while looking correct in review.
+urls = [cp["settings"]["url"] for cp in doc["contact_points"] if cp["type"] == "discord"]
+assert len(urls) == len(set(urls)), f"two Discord contact points share a webhook: {urls}"
+
+# ⚠️ Ordering. Matching stops at the first matching sibling, and every app alert also carries a
+# `severity` -- so a route that matches only `severity` shadows every app route below it, and
+# that app's channel stays silent with nothing in the config looking wrong. The app routes must
+# come first. docs/research/grafana-multi-app-alert-routing.md, §2a.
+seen_severity_only = None
+for r in real.get("routes") or []:
+    keys = {m[0] for m in r["object_matchers"]}
+    if keys == {"severity"}:
+        seen_severity_only = r["object_matchers"]
+    elif "app" in keys:
+        assert seen_severity_only is None, (
+            f"route {r['object_matchers']} is unreachable: {seen_severity_only} matches first")
 
 # The repository's own files translate.
 for path in sorted((HERE.parent / "grafana" / "rules").glob("*.yml")):

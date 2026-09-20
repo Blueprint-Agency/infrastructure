@@ -70,6 +70,41 @@ Alert rules keep the naming already in use: **symptom + scope** — `container-d
 `backup-stale-bpvps2`, `endpoint-down`, `tls-expiry`. Do not drift from it; consistency here is
 what makes an alert readable at 2am by someone who did not write it.
 
+The folder is filing, not routing. Grafana routes on labels; a folder reaches the routing tree
+only as the reserved label `grafana_folder`. Which is why the next section is about a label.
+
+## A new app = a webhook, a contact point, a route, a label
+
+Each app gets **its own Discord channel**, so an application alert never buries a host running out
+of disk — and one Grafana stack still owns every rule, every silence and one message format. That
+is Grafana's own documented shape (a parent policy per scope, nested policies for the specific
+cases), not a local invention: `docs/research/grafana-multi-app-alert-routing.md` cites it.
+
+It is also not a second alerting vendor, so it does not touch decision #22. A second webhook is a
+second *address* on the same Discord integration, exactly as a second email address would be.
+
+Four steps, every time, and nothing else:
+
+1. **A Discord webhook** for the new channel. Server Settings → Integrations → Webhooks → New
+   Webhook. Its URL is a credential and this repo is public, so it goes in `.env` as
+   `DISCORD_<APP>_WEBHOOK_URL` and is listed (blank) in `.env.example`. Never share one webhook
+   between two contact points — `test_grafana_apply.py` fails if two do.
+2. **A contact point** in `grafana/alerting/notifications.yml`, merging the `&discord_format`
+   anchor and overriding only `url`. Merging is what keeps every channel's messages identical.
+3. **One route** at the **top** of `policy.routes`, matching `[[app, "=", <name>]]`, with the
+   three severity tiers nested under it merging `*critical_timing`, `*warning_timing`,
+   `*info_timing`. Above the infra severity routes, always: matching stops at the first matching
+   sibling, so a route below them is dead config that looks alive.
+4. **Rules labelled `app: <name>`** in `grafana/rules/<name>.yml`, folder `Apps`. Static labels
+   beat anything a series carries, so the label is reliable. A rule that forgets it lands in the
+   infra channel — wrong room, not silence.
+
+`app` is the key for this, not `service` or `team`: it is already the metric and log label above,
+and Grafana's labelling guidance asks for one consistent key across teams rather than any
+particular spelling. One team owns everything here, so `team` would carry no information.
+
+Currently routed: `booking` → `discord-booking`. Everything unlabelled → `discord`.
+
 ## The budget is shared
 
 Infra and apps draw on the same active-series and log allowances. Two hosts of infrastructure is

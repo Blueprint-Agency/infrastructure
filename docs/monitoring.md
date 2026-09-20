@@ -346,6 +346,32 @@ cannot work: a stopped container's series just stops, and Grafana treats a vanis
 resolved. CI fails when a compose file on the host defines a container the rule does not name.
 The monitoring stack's own containers are exempt — an agent cannot report its own absence.
 
+### Where an alert lands
+
+Two Discord channels, one routing tree. The rule's **`app` label** decides, and nothing else:
+
+| A rule labelled | goes to contact point | because |
+|---|---|---|
+| no `app` label | `discord` | it is infrastructure — a host, a container, a certificate |
+| `app: booking` | `discord-booking` | booking-system's own alerts, in their own room |
+
+Severity only sets the pace (10s / 1m / 5m group wait), never the destination — both channels run
+the same three tiers, written once in `grafana/alerting/notifications.yml` and merged into both.
+
+**The label is the contract, not the folder.** A booking rule filed in the `Apps` folder but
+missing `app: booking` is not silent — it arrives in the infra channel, which is the wrong room
+and harder to notice than silence. Every rule in `grafana/rules/booking.yml` carries
+`app: booking` in its static `labels:`, beside `severity`.
+
+**Order in the tree is load-bearing.** Grafana stops at the first matching sibling policy, and
+every app alert also carries a `severity`, so the `app` routes sit *above* the severity routes; an
+app route placed below them would never be reached. `scripts/test_grafana_apply.py` fails the
+build if that order is ever inverted. Why, with citations:
+`docs/research/grafana-multi-app-alert-routing.md`.
+
+Adding the next app is four things and no redesign — see `docs/grafana-organization.md`, "A new
+app = a webhook, a contact point, a route, a label".
+
 ### What each alert means, and the first three things to check
 
 Replace `<host>` with the alert's `host` label. Every alert names it.
@@ -473,15 +499,17 @@ own addresses. **No address is committed here** — this repository is public.
    alerting vendor, so no Telegram, ntfy or Pushover):
    **Contact points and the routing tree are a file** — `grafana/alerting/notifications.yml`,
    applied by `grafana-apply.py` like the dashboards and rules. The only manual part is
-   creating the Discord webhook (Server Settings → Integrations → Webhooks → New Webhook) and
-   putting its URL in `.env` as `DISCORD_WEBHOOK_URL`. It is a credential and this repository is
-   public, so it never goes in the yaml; an unset one fails the apply rather than creating a
-   contact point that silently delivers nothing.
+   creating each Discord webhook (Server Settings → Integrations → Webhooks → New Webhook) and
+   putting its URL in `.env` — `DISCORD_WEBHOOK_URL` for infrastructure,
+   `DISCORD_BOOKING_WEBHOOK_URL` for booking-system's own alerts. They are credentials and this
+   repository is public, so they never go in the yaml; an unset one fails the apply rather than
+   creating a contact point that silently delivers nothing.
 
-   As configured on 2026-09-14: one contact point, `discord`. `critical` → 10s group wait (the
-   `endpoint-down` timing in `grafana/rules/endpoints.yml` needs it), `warning` → 1m,
-   `info` → 5m and a day between repeats, because `info` is the textfile canary and it is
-   *meant* to fire during the seam test.
+   As configured on 2026-09-14, extended 2026-09-20: two contact points, `discord` (infra) and
+   `discord-booking`, identical in format and differing only in webhook. Both run the same three
+   severity tiers: `critical` → 10s group wait (the `endpoint-down` timing in
+   `grafana/rules/endpoints.yml` needs it), `warning` → 1m, `info` → 5m and a day between
+   repeats, because `info` is the textfile canary and it is *meant* to fire during the seam test.
 
    > ⚠️ **Discord will not reliably wake anyone at 2am** — phone Do Not Disturb silences it.
    > Set that server to "All Messages" and add it to the DND exceptions, or accept that an
