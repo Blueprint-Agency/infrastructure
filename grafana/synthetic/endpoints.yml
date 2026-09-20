@@ -30,6 +30,18 @@ vars:
     BOOKING_FQDN: api.reservetoday.app
 
 endpoints:
+  # The booking backend. `/` answers 200 from Hono without touching Postgres, so an instance
+  # whose database is gone probed as healthy and grafana/rules/endpoints.yml's endpoint-down
+  # stayed quiet. `/health` runs `SELECT 1` and answers 503 when the database is unreachable
+  # (be/src/app.ts), which is a probe failure -- so a dead database now reads as a dead API,
+  # which is what it is to anyone using it. That is booking-system#166's "API down" rule,
+  # already written: grafana/rules/booking.yml, §3, says why there is no second rule for it.
+  # Three probes a minute each is three `SELECT 1`s a minute per instance.
+  api.dev.reservetoday.app:
+    path: /health
+  api.reservetoday.app:
+    path: /health
+
   # The dashboard routers exist, but neither name has a DNS record (checked 2026-09-14), so
   # nothing outside can reach them. Probing would be a permanently failing check. If a record
   # is ever added, remove the skip -- and expect a 401 from the basic-auth middleware.

@@ -121,8 +121,14 @@ never a studio's name, in every query and rule.
 ```logql
 sum by (container) (count_over_time({container="booking-be-staging", level="error"} [5m]))
 {container="booking-be-staging", level="error"} | json | webhook="stripe"
-sum(count_over_time({container="booking-be-staging"} | json | job="<job>" | outcome="ok" [25h]))
+sum(count_over_time({container="booking-be-staging"} |= "cron job ok" | json | job="<job>" [25h]))
 ```
+
+> ⚠️ **Never count `outcome="ok"` on its own.** The backend's outbound-call wrapper
+> (`be/src/lib/outbound.ts`) logs `outcome: "ok"` for every Stripe, storage and email call too —
+> and inside a cron run those lines carry that run's `job`, so a count of `job=<name>` plus
+> `outcome=ok` counts calls, not runs. The heartbeat is the *message*: `cron job ok`, written
+> once per run by `be/src/jobs/index.ts`. `grafana/rules/booking.yml` matches on it.
 
 Probe heartbeats carry `probe` (`docker`, `postgres`, `mail`, `tailscale`) — **never `job`**, which
 the agent's scrape owns and would rename to `exported_job`.
@@ -268,13 +274,20 @@ with no other edit. CI fails when:
 python vps/shared/public-endpoints.py        # the names, the host each is on, the URL probed
 ```
 
-Each check: `GET https://<name>/`, redirects followed, **fail on plain HTTP**, 10 s timeout,
+Each check: `GET https://<name>/` — or the `path:` an entry under `endpoints:` names instead —
+redirects followed, **fail on plain HTTP**, 10 s timeout,
 labels `host` and `managed_by=infrastructure`. The job name is the hostname. `grafana-apply.py`
 creates, updates, and deletes a managed check whose router is gone; a hand-made check is never
 touched.
 
 **Skipped:** `traefik-bpvps1.teeko.ai` and `traefik-bpvps2.teeko.ai` — the dashboard routers exist
 but neither name has a DNS record (2026-09-14), so nothing outside can reach them.
+
+**Probed somewhere other than `/`:** `api.dev.reservetoday.app` and `api.reservetoday.app` are
+probed at **`/health`**. `/` answers 200 from Hono without touching Postgres, so a backend whose
+database was gone probed as healthy; `/health` runs `SELECT 1` and answers 503 when it is not
+(booking-system#166). This is what makes `endpoint-down` the "API down" alert for booking — see
+"Alerts" above for why there is no second, booking-labelled copy of that rule.
 
 **Who renews each certificate** — where to look when `tls-expiry` fires:
 
@@ -328,6 +341,34 @@ The policy is deliberately short: a handful of rules, each meaning one thing a p
 | `series-budget` | warning | active series > 80% of the ceiling, held 1 h |
 | `textfile-canary-stale` | info | only during the seam test |
 
+And booking-system's own, every one of them labelled `app: booking` so it lands in the booking
+channel (`grafana/rules/booking.yml`, from booking-system#166):
+
+| Rule | Severity | Fires when |
+|---|---|---|
+| `booking-error-rate` | warning | more than 20 `level=error` lines from a `booking-be` instance in 5 min |
+| `booking-stripe-webhook-failed` | critical | **any** `level=error` line with `webhook=stripe` in 5 min |
+| `booking-job-stale-<job>-<env>` | warning | no `cron job ok` line for that job in 25 h, held 15 min — eight rules, four daily jobs × staging and prod |
+
+**"API down" is not in that table**, and that is deliberate: `endpoint-down` above already fires
+when every probe has failed `api.dev.reservetoday.app` or `api.reservetoday.app` twice in a row,
+which is what booking-system#166 asked for. It is an infra rule with no `app` label, so **a
+booking API outage arrives in the infra channel, not the booking one** — known, and the reason a
+duplicate booking-labelled copy was not added is that one outage would then send two messages
+with two thresholds to keep in step. What *was* added is the probe path: both names are now
+probed at `/health` (`grafana/synthetic/endpoints.yml`), which runs `SELECT 1`, so an instance
+whose Postgres is gone fails the check instead of answering 200 from `/`.
+
+**Why the booking rules are not per host, but the job ones name their container.** Same split as
+below: `booking-error-rate` and `booking-stripe-webhook-failed` count a value that is PRESENT, so
+one rule covers both instances and `sum by (host, container)` names the one that is wrong.
+A job heartbeat that stops produces **no Loki series at all**, and a `sum by (…)` over nothing
+yields nothing — so each job rule names its container and its job literally, turns "no lines" into
+`0` with `or vector(0)`, and sets `noDataState: Alerting` so that silence from Loki itself is also
+read as failure rather than as health. There is no `env` label anywhere: the agent does not set
+one, and `container` (`booking-be-staging` / `booking-be-prod`) is how every other rule in this
+repo tells the two instances apart.
+
 **Why some rules are per host.** A rule that fires on a value that is present and too high
 (disk, memory, restarts) is written once for every host. A rule that must notice **silence** —
 a container gone, a heartbeat gone — has to name the host in `absent_over_time`, so
@@ -362,6 +403,10 @@ the same three tiers, written once in `grafana/alerting/notifications.yml` and m
 missing `app: booking` is not silent — it arrives in the infra channel, which is the wrong room
 and harder to notice than silence. Every rule in `grafana/rules/booking.yml` carries
 `app: booking` in its static `labels:`, beside `severity`.
+
+The one booking alert that lands in the **infra** channel on purpose is `endpoint-down` for
+`api.dev.reservetoday.app` / `api.reservetoday.app`: it is an endpoint rule covering every public
+name, so it carries no `app` label. See "Alerts", above.
 
 **Order in the tree is load-bearing.** Grafana stops at the first matching sibling policy, and
 every app alert also carries a `severity`, so the `app` routes sit *above* the severity routes; an
@@ -463,6 +508,53 @@ says which (`docker` → `container-restarting`, `postgres` → `postgres-connec
 
 **`textfile-canary-stale`** — only expected during the seam test. Delete `canary.prom`.
 
+**`booking-error-rate`** — a `booking-be` instance is logging more errors than a healthy one
+does. The backend writes one `level=error` line per unhandled error (booking-system#162), so this
+counts errors, not chatter. The `container` label says which instance.
+1. Explore → `grafanacloud-logs`:
+   `{container="<container>", level="error"} | json` over the last 15 minutes. Group by
+   `requestId` first — one broken request retried is not the same incident as many failing.
+   Then `tenantId`, which is **always an id, never a studio's name**.
+2. **Did something deploy in the last few minutes?** That is the usual cause. The image tag:
+   `ssh bp-bpvps2 'docker inspect <container> --format "{{.Config.Image}} {{.Created}}"'`.
+3. Is it downstream? `booking-db-<env>` in `docker ps`, `postgres-connections` firing alongside,
+   or the errors all naming one outbound call (Stripe, R2, Resend) in the line.
+> ⚠️ **The threshold — 20 lines in 5 minutes — is a starting guess, not a measurement.**
+> booking-system#166 asks for it to be set from a week of staging data, and no such week existed
+> when the rule was written. Read the first weeks of firings as calibration, and change the number
+> in a commit that says which data it came from. "Tune or delete" below applies to it first.
+
+**`booking-stripe-webhook-failed`** — the Stripe webhook route logged an error, so Stripe believes
+it delivered an event the booking system never recorded: a payment, a refund or a subscription
+change may be missing. Any single line fires this.
+1. Explore → `grafanacloud-logs`:
+   `{container="<container>", level="error"} | json | webhook="stripe"` — the line carries
+   `eventId` and `eventType`.
+2. Stripe dashboard → **Developers → Webhooks → the endpoint** → that event: Stripe's own view of
+   the delivery and its retries.
+3. Once the handler is fixed, **resend the event from the Stripe dashboard**; the handler is the
+   only thing that writes that state. A rejected *signature* logs at `warn` and does not fire this
+   rule — if signatures are being refused, the endpoint secret is wrong, not the handler.
+
+**`booking-job-stale-<job>-<env>`** — the backend's cron scheduler has not written a `cron job ok`
+line for that job in 25 hours. The rule's title names the job and the instance.
+1. Is the container even up? `ssh bp-bpvps2 'docker ps --filter name=booking-be-<env>; docker logs
+   --tail 100 booking-be-<env> | grep -i cron'`. A crash-loop shows up as `container-restarting`
+   in the infra channel at the same time.
+2. Explore → `grafanacloud-logs`:
+   `{container="booking-be-<env>"} |= "cron job" | json | job="<job>"` — a run that *failed*
+   logs `cron job failed` at `error` instead, which is a different problem from a run that never
+   happened, and `booking-error-rate` may be firing too.
+3. **All four jobs for one instance at once** means the scheduler or the process, not the job.
+   One job alone means that job's handler is throwing before it can report.
+> **What this rule does and does not prove.** The four daily jobs are registered on a shared
+> 15-minute slot grid (`be/src/jobs/local-time.ts`), and each tick logs `cron job ok` whether or
+> not any Tenant's local hour was due — the per-Tenant work is decided inside the run. So this is
+> a **heartbeat that the scheduler is alive**, roughly 96 lines a day per job, and 25 hours of
+> silence means the scheduler stopped. It is **not** evidence that a given Tenant's daily run
+> happened: a job whose per-Tenant pass is quietly doing nothing keeps this rule green. Proving
+> that belongs in the application's own checks, not here.
+
 ### Tune or delete
 
 > **Any alert that fires twice without a real problem is tuned or deleted the same week.**
@@ -525,6 +617,10 @@ python scripts/grafana-apply.py
 ```
 
 CI does **not** apply them — apply after merging. A `grafana/` change triggers only the drift job.
+
+The first apply that carries `grafana/rules/booking.yml` creates the **`Apps`** folder as well as
+`Monitoring`, and changes both booking API checks' target from `/` to `/health` (matched on job =
+the hostname, so the checks are updated, not recreated). Read the printed plan first.
 
 ### Silencing during planned work
 
