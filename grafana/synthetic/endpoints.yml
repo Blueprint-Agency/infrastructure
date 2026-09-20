@@ -9,7 +9,8 @@
 #   vars          values of ${VARS} in router rules that come from host .env files, never
 #                 committed. Key "*" applies everywhere; "<host>/<stack dir>" to one destination
 #                 (fanout-aware). Read off the hosts with `docker inspect` on 2026-09-14.
-#   endpoints     per-name exceptions to the DERIVED list: `path` to probe instead of /, or
+#   endpoints     per-name exceptions to the DERIVED list: `path` to probe instead of /,
+#                 `frequency` to run at a cadence other than the file-wide one, or
 #                 `skip: <reason>`. A registry domain can never be skipped; CI fails it.
 #   off_platform  names this repository does not host at all and no router here serves, typed
 #                 by hand because nothing can derive them (#37). Each one carries a `reason`
@@ -21,10 +22,56 @@
 #
 # Apply: scripts/grafana-apply.py. Runbook: docs/monitoring.md, "External checks".
 
-# Grafana's public probes each check runs from, by name (grafana-apply.py fails on an unknown
-# one and lists the real names). Three, near the users: grafana/rules/endpoints.yml fires only
-# when EVERY probe fails, so one probe's own network trouble is not a page.
-probes: [Singapore, Tokyo, Mumbai]
+# ── The budget, and the cadence it bought (#42) ──────────────────────────────────────────────
+# Grafana Cloud's free tier allows 100,000 Synthetic Monitoring executions a month, counted PER
+# PROBE PER RUN. A 30-day month is 43,200 minutes, so the ENTIRE allowance is about 2.3
+# executions a minute across every check. One name, one probe, every 60s is 43,200 -- 43% of it.
+#
+# Read at the account on 2026-09-20 (GET /api/v1/check/list, the tenant's own record): 15 checks,
+# 11 of them from 3 probes and 4 from 1, every one at 60s.
+#
+#     11 x 3 x 43,200  =  1,425,600      derived checks
+#      4 x 1 x 43,200  =    172,800      off_platform frontends
+#                        ───────────
+#                          1,598,400 /month  =  16x the free tier
+#
+# Nothing had complained only because the account is on a Pro trial that ends 2026-09-27.
+#
+# The shape below, and what it costs:
+#
+#     2 x 1 x 21,600  =   43,200         api.dev + api, every 2m   (the two /health checks)
+#    13 x 1 x  2,880  =   37,440         everything else, every 15m
+#                       ───────────
+#                           80,640 /month  =  81% of the free tier
+#
+# 19,360 executions of headroom -- about six more names at 15 minutes. `public-endpoints.py`
+# prints this total on every run, so the next person adding a check sees the price.
+#
+# WHY THIS SPLIT. Fast detection is kept where an outage costs money: the two booking backends,
+# whose /health answers 503 when Postgres is unreachable, so the check is the API-down alert
+# (booking-system#166). Everything else -- a blog, a webmail login page, a marketing site -- is a
+# fifteen-minute promise, which is the trade being bought: fifteen minutes of a dead webmail page
+# will go unnoticed. Paying for Synthetic Monitoring is the other real option, and should be a
+# decision rather than something arrived at by forgetting a trial's end date.
+#
+# ⚠️ A CADENCE IS NOT A FREE KNOB. grafana/rules/endpoints.yml reads
+# max_over_time(probe_success[window]), and over a series that only updates every 15 minutes a
+# 2-minute window is empty at most evaluations -- the alert would flicker on staleness instead of
+# firing on failure. So the window grows with the interval (2 x interval + 1m for the push lag),
+# there is ONE endpoint-down rule per cadence, and each check carries its cadence as a `cadence`
+# label for that rule to match on. scripts/test_grafana_apply.py fails the build if a cadence
+# used here has no rule, or if a rule's window is not 2 x its interval + 1m.
+
+# Grafana's public probes each check runs from, by name (grafana-apply.py fails on an unknown one
+# and lists the real names). ONE, nearest the users. Three probes is 3x the bill, and the free
+# tier cannot pay for it: see the arithmetic above. The cost is real and is written down in
+# grafana/rules/endpoints.yml -- "fires only when EVERY probe fails" now means this one probe,
+# twice in a row, so a single flaky hop out of Singapore is indistinguishable from an outage.
+probes: [Singapore]
+
+# The default cadence. Overridden per name under `endpoints:` / `off_platform:`; every distinct
+# value here needs its own endpoint-down rule, so add one deliberately rather than casually.
+frequency: 15m
 
 vars:
   "*":
@@ -43,11 +90,17 @@ endpoints:
   # (be/src/app.ts), which is a probe failure -- so a dead database now reads as a dead API,
   # which is what it is to anyone using it. That is booking-system#166's "API down" rule,
   # already written: grafana/rules/booking.yml, §3, says why there is no second rule for it.
-  # Three probes a minute each is three `SELECT 1`s a minute per instance.
+  #
+  # These two are the ONLY names that keep a fast cadence, because they are the only ones whose
+  # outage costs money by the minute. 2m rather than the old 60s: it halves the bill for the
+  # tier that dominates it, and endpoint-down-2m's 5-minute window still fires on two failures
+  # in a row. One probe every 2 minutes is one `SELECT 1` every 2 minutes per instance.
   api.dev.reservetoday.app:
     path: /health
+    frequency: 2m
   api.reservetoday.app:
     path: /health
+    frequency: 2m
 
   # The dashboard routers exist, but neither name has a DNS record (checked 2026-09-14), so
   # nothing outside can reach them. Probing would be a permanently failing check. If a record
@@ -70,13 +123,14 @@ endpoints:
 #              not be a key in vps/hosts.json: `host=bpvps2` on a name bpvps2 does not serve
 #              would send someone to ssh a host that is fine.
 #   path       optional, default /.
-#   probes     optional, overriding the file-wide `probes:` above. See the budget below.
-#   frequency  optional, default 60s. ⚠️ grafana/rules/endpoints.yml reads
-#              max_over_time(probe_success[2m]) and Synthetic Monitoring's push lag is ~1m, so
-#              anything longer than 60s leaves that window empty at most evaluations and the
-#              alert instance appears and vanishes instead of firing. Lengthening it means
-#              rewriting that rule's window first. This is why the budget below buys its
-#              headroom with FEWER PROBES and not with a longer interval.
+#   probes     optional, overriding the file-wide `probes:` above. Each extra probe is another
+#              full execution per run: see the budget at the top of this file.
+#   frequency  optional, overriding the file-wide `frequency:`. ⚠️ Every distinct cadence needs
+#              its own endpoint-down rule in grafana/rules/endpoints.yml, whose window must be
+#              2 x the interval + 1m for Synthetic Monitoring's push lag -- otherwise the
+#              window is empty at most evaluations and the alert flickers on staleness instead
+#              of firing on failure. scripts/test_grafana_apply.py fails the build if a cadence
+#              used here has no matching rule.
 #
 # ── Why these four URLs and no others ────────────────────────────────────────────────────────
 # fe-client is served at {slug}.reservetoday.app, where the slug IS a studio, and
@@ -102,31 +156,11 @@ endpoints:
 # above. Closing the gap needs a slug-free route on fe-client that exercises one real Tenant
 # lookup without naming it -- a booking-system ticket, not this file.
 #
-# ── Free-tier budget ─────────────────────────────────────────────────────────────────────────
-# Grafana Cloud free allows 100,000 Synthetic Monitoring API-test executions a month, and an
-# execution is counted PER PROBE PER RUN. A 30-day month is 43,200 minutes, so one check from
-# one probe every 60s is 43,200 executions -- 43% of the whole allowance.
-#
-#   derived checks today   11 names x 3 probes x 43,200 =  1,425,600 /month
-#   + frontends at 3 probes 4 names x 3 probes x 43,200 =    518,400 /month
-#   + frontends as written  4 names x 1 probe  x 43,200 =    172,800 /month
-#   total as written                                     =  1,598,400 /month  (16x the allowance)
-#
-# ⚠️ The arithmetic's real finding: the DERIVED checks alone are already 14x the free tier, so
-# there is no remaining budget to fit these four into -- the honest number is negative, not
-# spare. #37's "under the free tier alongside the existing checks" cannot be met by choosing a
-# cadence for four names; it needs a decision about the cadence of all fifteen, which #24 timed
-# deliberately ("a phone within five minutes") and this issue does not get to overturn. The
-# account is on a Pro trial (docs/monitoring.md, "Grafana Cloud entitlements"), so nothing is
-# being throttled today; read Synthetics usage at the account before the trial ends and decide
-# there. Recorded here so the next person does not rediscover it.
-#
-# What #37 CAN do is not make it materially worse, which is the one probe below: Singapore,
-# nearest the users. The cost is that `endpoint-down`'s "every probe failed" degenerates to
-# "this probe failed twice in a row", so a Singapore-to-Vercel network fault is a page. That
-# trade is acceptable HERE and nowhere else: these alerts are "read Vercel's status page", not
-# "ssh the host", and a probe-local fault between Singapore and Vercel's edge is roughly what a
-# user in that region sees anyway. The self-hosted names keep all three.
+# ── Cadence and probes ───────────────────────────────────────────────────────────────────────
+# These four take the file-wide defaults -- one probe, every 15 minutes -- like every other name
+# that is not a booking backend. #37 gave them `probes: [Singapore]` explicitly because the
+# file-wide list was then three; #42 made one probe the rule everywhere, so the override said
+# nothing and is gone. The budget, and what fifteen minutes costs, is at the top of this file.
 off_platform:
   www.reservetoday.app:
     reason: >-
@@ -135,7 +169,6 @@ off_platform:
       `www` is a reserved non-Tenant label, so this URL names no studio.
     platform: vercel
     path: /
-    probes: [Singapore]
 
   www.dev.reservetoday.app:
     reason: >-
@@ -143,7 +176,6 @@ off_platform:
       *.dev.reservetoday.app. The bare dev.reservetoday.app has no DNS record.
     platform: vercel
     path: /
-    probes: [Singapore]
 
   admin.portal.reservetoday.app:
     reason: >-
@@ -152,7 +184,6 @@ off_platform:
       the one slug-free page the staff app has.
     platform: vercel
     path: /platform
-    probes: [Singapore]
 
   admin.portal.dev.reservetoday.app:
     reason: >-
@@ -160,4 +191,3 @@ off_platform:
       *.portal.dev.reservetoday.app.
     platform: vercel
     path: /platform
-    probes: [Singapore]

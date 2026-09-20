@@ -67,8 +67,14 @@ Apps/    booking, kaiteki, ...
 ```
 
 Alert rules keep the naming already in use: **symptom + scope** — `container-down-bpvps2`,
-`backup-stale-bpvps2`, `endpoint-down`, `tls-expiry`. Do not drift from it; consistency here is
-what makes an alert readable at 2am by someone who did not write it.
+`backup-stale-bpvps2`, `endpoint-down-2m`, `endpoint-down-15m`, `tls-expiry`. Do not drift from it;
+consistency here is what makes an alert readable at 2am by someone who did not write it.
+
+> ⚠️ A rule's **title** must be unique within its folder — Grafana keys rules on
+> `(org, folder, title)` and rejects the whole group PUT otherwise, part-way through an apply
+> that has already written the earlier groups. So the scope goes in the title too:
+> `Public endpoint failing (2m)` / `(15m)`, `Container down on bpvps1` / `bpvps2`.
+> `scripts/test_grafana_apply.py` fails the build on a duplicate.
 
 The folder is filing, not routing. Grafana routes on labels; a folder reaches the routing tree
 only as the reserved label `grafana_folder`. Which is why the next section is about a label.

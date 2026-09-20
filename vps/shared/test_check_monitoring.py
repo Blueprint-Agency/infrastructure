@@ -365,6 +365,33 @@ expect("endpoint rule pinned to a VPS host",
                    "min by (instance, job) (probe_ssl_earliest_cert_expiry) - time()")}),
        1, 'host="h1"', "paas", "www.vendor.example")
 
+# Since #42 there is one endpoint-down rule PER CADENCE, so `endpoint-down` is a prefix and not
+# a uid. A correct file with endpoint-down-2m / endpoint-down-15m must pass...
+CADENCE_UIDS = ["endpoint-down-2m", "endpoint-down-15m", "tls-expiry"]
+TLS_EXPR = "min by (instance, job) (min_over_time(probe_ssl_earliest_cert_expiry[31m])) - time()"
+
+
+def per_cadence(slow):
+    return heartbeat(
+        CADENCE_UIDS,
+        'max by (instance, job) (max_over_time(probe_success[5m])) and on (instance, job) sm_check_info{cadence="2m"}',
+        slow,
+        TLS_EXPR)
+
+
+expect("one endpoint-down rule per cadence",
+       base(**{"grafana/synthetic/endpoints.yml": OFF_PLATFORM,
+               "grafana/rules/endpoints.yml": per_cadence(
+                   'max by (instance, job) (max_over_time(probe_success[31m])) and on (instance, job) sm_check_info{cadence="15m"}')}),
+       0)
+
+# ...and a host matcher on ANY of them must still be caught, not only on the first.
+expect("one cadence's rule pinned to a VPS host",
+       base(**{"grafana/synthetic/endpoints.yml": OFF_PLATFORM,
+               "grafana/rules/endpoints.yml": per_cadence(
+                   'max by (instance, job) (max_over_time(probe_success{host="h1"}[31m]))')}),
+       1, "endpoint-down-15m", 'host="h1"', "paas")
+
 expect("this repository", REPO, 0)
 
 print("check-monitoring.py: all checks passed")

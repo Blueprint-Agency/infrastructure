@@ -11,20 +11,50 @@
 # still fresh -- without it the join errors for ~5 min and the rule reads Error, not firing.
 # Silences and summaries then use host=bpvps1 / host=bpvps2, the same label as every other rule.
 #
-# Both rules below read every job, with no host matcher, so the off_platform checks (#37 --
+# Every rule below reads every job, with no host matcher, so the off_platform checks (#37 --
 # booking-system's Vercel frontends, which no router here serves) inherit them with no edit;
 # their `host` label is `vercel`, their platform, rather than a VPS key. Adding a host matcher to
-# either rule would silently stop alerting on every one of them: vps/shared/check-monitoring.py
+# any rule would silently stop alerting on every one of them: vps/shared/check-monitoring.py
 # fails the build if anyone does.
-#
-# Those four run from ONE probe, not three, to buy free-tier headroom (the arithmetic is in
-# grafana/synthetic/endpoints.yml). For them "every probe failed" means that one probe, so a
-# Singapore-to-Vercel network fault is a page -- a trade taken because their remedy is "read
-# Vercel's status page", not "ssh the host". They keep the 60s frequency the 2m window assumes.
 #
 # NO `app` label, deliberately, including for the booking names: one rule cannot label four of
 # its instances and not the other eleven, and grafana/rules/booking.yml §3 already refused a
 # second copy of this rule for the booking API. docs/monitoring.md, "Where an alert lands".
+#
+# ── ONE endpoint-down RULE PER CADENCE (#42) ─────────────────────────────────────────────────
+# Checks no longer all run every 60 s. Synthetic Monitoring's free tier counts executions per
+# probe per run, and fifteen names from three probes every minute was 16x the allowance, so
+# grafana/synthetic/endpoints.yml now runs the two booking /health checks every **2m** and
+# everything else every **15m**, each from one probe. That file holds the arithmetic.
+#
+# A cadence is not a free knob, and this is the part that goes wrong quietly:
+#
+#   * max_over_time(probe_success[2m]) over a series that only updates every 15 minutes is
+#     EMPTY at most evaluations. The alert instance would appear and vanish -- flickering on
+#     staleness rather than firing on failure. So the window is **2 x interval + 1m**, the 1m
+#     being Synthetic Monitoring's push lag: 5m at a 2m cadence, 31m at 15m.
+#   * sm_check_info is pushed by the probe with each run, so at 15 minutes it is stale for
+#     Prometheus's 5-minute instant lookback too, and the plain `sm_check_info` join that
+#     worked at 60 s returns nothing at most evaluations. Every join below therefore reads
+#     `last_over_time(sm_check_info[window])`, never the bare selector.
+#
+# Each check carries its cadence as a `cadence` label, and each rule matches on it, so a check
+# is covered by exactly one rule. `label_cadence` or `cadence` for the same tenant-mode reason
+# as `host` above -- the `or` picks up whichever spelling the tenant writes.
+# scripts/test_grafana_apply.py fails the build when a cadence in use has no rule here, when a
+# rule matches a cadence nothing uses, or when a window is not 2 x its interval + 1m.
+#
+# ⚠️ ONE PROBE, not three, everywhere (#42). "Fires only when EVERY probe fails, so one probe's
+# own network trouble is not a page" was the premise this file was written on and it is no
+# longer true: with a single probe, one flaky hop out of Singapore is indistinguishable from a
+# real outage. What survives of the mitigation is the window -- two consecutive failures from
+# that probe, never one. That is the detection this budget buys; the honest reading of every
+# `endpoint-down` below is "Singapore has failed this name twice in a row".
+#
+# ⚠️ AFTER A CADENCE CHANGE, the first apply can page. A rule matches `cadence="15m"`, and no
+# series carries that label until each check has run once under the new config -- up to fifteen
+# minutes, during which these rules see no data and `noDataState: NoData` does what it says.
+# Run scripts/grafana-apply.py in daylight and expect one NoData round. docs/monitoring.md.
 apiVersion: 1
 groups:
   - orgId: 1
@@ -32,26 +62,31 @@ groups:
     folder: Monitoring
     interval: 1m
     rules:
+      # ── cadence 2m: the two booking backends ────────────────────────────────────────────
       # The ten-week VPS1 outage: every container healthy, every domain 404. Nothing on the
       # host can see this; a probe outside it can.
       #
-      # max_over_time over 2m, per probe, then max across probes: this is 1 if ANY probe
-      # succeeded even once in two minutes. So it drops below 1 only after every probe has
-      # failed at least two consecutive runs (checks run every 60 s) -- a real outage, not
-      # one probe's bad minute -- a deliberate reading of #22's "2 consecutive failures": every
-      # probe, not any. No `for`: the window already is the wait.
+      # max_over_time over 5m, per probe, then max across probes: this is 1 if ANY probe
+      # succeeded even once in five minutes. At a 2m cadence that is two runs plus the push
+      # lag, so it drops below 1 only after two consecutive failures -- #22's "2 consecutive
+      # failures", read as every probe rather than any. No `for`: the window already is the wait.
       #
-      # Traefik stopped at t0, worst case: the last success leaves the window by t0+2m, the next
-      # evaluation by t0+3m, SM's push lag ~1m -> t0+4m, then the notification policy's group
-      # wait. #24 wants a phone within five minutes, so the critical route's group wait is 10 s
-      # (docs/monitoring.md, first-time setup). At the default 30 s it is too close to call.
-      - uid: endpoint-down
-        title: Public endpoint failing
+      # Traefik stopped at t0, worst case: the last success leaves the window by t0+5m, the next
+      # evaluation by t0+6m, then the notification policy's group wait. #24 wanted a phone
+      # within five minutes and that bar is no longer met here -- **~6-7 minutes** is what a 2m
+      # cadence buys, against a measured 2m37s at 60 s (docs/monitoring.md, the #24 test). It is
+      # the price of staying inside the free tier; the critical route's group wait stays 10 s.
+      # ⚠️ The title must differ from the 15m rule's. Grafana keys alert rules uniquely on
+      # (org, folder, title), so two rules called "Public endpoint failing" in the Monitoring
+      # folder are rejected at the PUT -- and the apply aborts partway through the loop, having
+      # already written the earlier groups. The suffix also tells the two apart in Discord.
+      - uid: endpoint-down-2m
+        title: Public endpoint failing (2m)
         condition: C
         data:
           - refId: A
             relativeTimeRange:
-              from: 600
+              from: 3600
               to: 0
             datasourceUid: grafanacloud-prom
             model:
@@ -59,12 +94,16 @@ groups:
               instant: true
               range: false
               expr: |
-                max by (instance, job) (max_over_time(probe_success[2m]))
+                (
+                  max by (instance, job) (max_over_time(probe_success[5m]))
+                  and on (instance, job)
+                  max by (instance, job) (last_over_time(sm_check_info{label_cadence="2m"}[5m]) or last_over_time(sm_check_info{cadence="2m"}[5m]))
+                )
                 * on (instance, job) group_left (host)
-                max by (instance, job, host) (topk by (instance, job) (1, label_replace(sm_check_info, "host", "$1", "label_host", "(.+)")))
+                max by (instance, job, host) (topk by (instance, job) (1, label_replace(last_over_time(sm_check_info[5m]), "host", "$1", "label_host", "(.+)")))
           - refId: C
             relativeTimeRange:
-              from: 600
+              from: 3600
               to: 0
             datasourceUid: __expr__
             model:
@@ -87,6 +126,67 @@ groups:
           value: "failing from every probe"
           description: >-
             Every Grafana probe has failed at least two runs in a row against {{ $labels.instance }}.
+            This name is checked every 2 minutes (grafana/synthetic/endpoints.yml).
+            If every name on {{ $labels.host }} fires together, suspect Traefik or the host:
+            `ssh bp-{{ $labels.host }} 'docker ps; docker logs --tail 50 traefik'`. One name alone:
+            its container, its router rule, or its DNS record. If {{ $labels.host }} is not one of
+            bpvps1/bpvps2 it is an off-platform name (grafana/synthetic/endpoints.yml,
+            off_platform:) -- nothing here serves it and there is nothing to ssh; read that
+            provider's status page. Runbook: docs/monitoring.md.
+
+      # ── cadence 15m: everything else ────────────────────────────────────────────────────
+      # Same rule, same severity, a window of 31m because the checks run every 15 (2 x 15m + 1m
+      # of push lag). Detection is up to ~31 minutes, and that is the trade #42 bought: fifteen
+      # minutes of a dead webmail page or blog will go unnoticed. It stays `critical` because
+      # the page being down is still a page-worthy fact -- only the speed changed, not the
+      # seriousness. If that turns out to hurt, paying for Synthetic Monitoring is the fix, and
+      # it should be a decision rather than a default (grafana/synthetic/endpoints.yml).
+      - uid: endpoint-down-15m
+        title: Public endpoint failing (15m)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                (
+                  max by (instance, job) (max_over_time(probe_success[31m]))
+                  and on (instance, job)
+                  max by (instance, job) (last_over_time(sm_check_info{label_cadence="15m"}[31m]) or last_over_time(sm_check_info{cadence="15m"}[31m]))
+                )
+                * on (instance, job) group_left (host)
+                max by (instance, job, host) (topk by (instance, job) (1, label_replace(last_over_time(sm_check_info[31m]), "host", "$1", "label_host", "(.+)")))
+          - refId: C
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+        noDataState: NoData
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} on {{ $labels.host }}"
+          value: "failing from every probe"
+          description: >-
+            Every Grafana probe has failed at least two runs in a row against {{ $labels.instance }}.
+            This name is checked every 15 minutes (grafana/synthetic/endpoints.yml), so it has
+            been down for at least half an hour.
             If every name on {{ $labels.host }} fires together, suspect Traefik or the host:
             `ssh bp-{{ $labels.host }} 'docker ps; docker logs --tail 50 traefik'`. One name alone:
             its container, its router rule, or its DNS record. If {{ $labels.host }} is not one of
@@ -97,13 +197,18 @@ groups:
       # Renewal fails silently: a TLS-ALPN-01 record flipped to proxied, a token scoped to the
       # wrong zone, acme.sh keyed on a renamed primary. Every renewal here runs at 30 days left,
       # so 21 days means at least nine days of failed attempts.
+      #
+      # ONE rule for every cadence, unlike endpoint-down: the threshold is 21 DAYS, so whether
+      # the number is half an hour old changes nothing. It only has to survive staleness, hence
+      # min_over_time / last_over_time over 31m -- the slowest cadence in use plus the push lag.
+      # If a slower cadence is ever added, this window grows with it; the test checks that.
       - uid: tls-expiry
         title: TLS certificate expiring
         condition: C
         data:
           - refId: A
             relativeTimeRange:
-              from: 600
+              from: 3600
               to: 0
             datasourceUid: grafanacloud-prom
             model:
@@ -111,12 +216,12 @@ groups:
               instant: true
               range: false
               expr: |
-                (min by (instance, job) (probe_ssl_earliest_cert_expiry) - time()) / 86400
+                (min by (instance, job) (min_over_time(probe_ssl_earliest_cert_expiry[31m])) - time()) / 86400
                 * on (instance, job) group_left (host)
-                max by (instance, job, host) (topk by (instance, job) (1, label_replace(sm_check_info, "host", "$1", "label_host", "(.+)")))
+                max by (instance, job, host) (topk by (instance, job) (1, label_replace(last_over_time(sm_check_info[31m]), "host", "$1", "label_host", "(.+)")))
           - refId: C
             relativeTimeRange:
-              from: 600
+              from: 3600
               to: 0
             datasourceUid: __expr__
             model:
@@ -127,7 +232,7 @@ groups:
                 - evaluator:
                     type: lt
                     params: [21]
-        # The endpoint rule already covers "no probe data".
+        # The endpoint rules already cover "no probe data".
         noDataState: OK
         execErrState: Error
         for: 10m

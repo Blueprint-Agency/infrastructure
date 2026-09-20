@@ -11,15 +11,20 @@ every run. Nothing on vps1-staging, vps2-prod or vps3-prod is watched.
 
 > **Live since 2026-09-14.** Grafana Cloud stack `blueprintdigital`, region
 > `prod-ap-southeast-1`. Both hosts run `alloy` and `probes` and are shipping metrics and logs;
-> 15 Synthetic checks probe every public name (11 self-hosted, from Singapore, Tokyo and Mumbai;
-> 4 off-platform, from Singapore only — see "External checks"); alerts deliver
-> to Discord. What remains _pending_ below is **testing**, not deployment — and the two that
-> matter most, the Traefik stop (#24) and a real backup heartbeat going stale and recovering,
-> have not been run. Deployed is not the same as proven.
+> 15 Synthetic checks probe every public name, **each from Singapore alone** — the two booking
+> `/health` checks every **2 minutes**, the other thirteen every **15** (#42, see "External
+> checks"); alerts deliver to Discord. What remains _pending_ below is **testing**, not
+> deployment — and the two that matter most, the Traefik stop (#24) and a real backup heartbeat
+> going stale and recovering, have not been run. Deployed is not the same as proven.
 
 > ⚠️ **The account is on a trial that ends 2026-09-27.** Limits today are Pro, not free, so any
 > usage figure read before then is not the one you will live with. The `series-budget` rule
 > hardcodes 8000 = 80% of the free tier's 10,000. Revisit both when the trial ends.
+>
+> Synthetic Monitoring's free tier **has** been sized against, on 2026-09-20: 15 checks at
+> 11×3 + 4×1 probes every 60 s was **1,598,400 executions/month against an allowance of
+> 100,000** — 16×, invisible only because the trial was paying for it. #42 cut it to
+> **80,640/month (81%)**. `vps/shared/public-endpoints.py` prints that total on every run.
 
 ## The pieces
 
@@ -53,6 +58,7 @@ every run. Nothing on vps1-staging, vps2-prod or vps3-prod is watched.
 | Metric retention | 13 months (some summaries say 14 days) | _pending_ |
 | Log retention | 30 days (some summaries say 14 days) | _pending_ |
 | Users | 3 | _pending_ |
+| Synthetic Monitoring executions / month | 100,000, counted per probe per run | **confirmed by usage, 2026-09-20** (#42) — the check list was read off the tenant and the bill computed from it: 1,598,400/month before, 80,640 after. The tenant's `/api/v1/tenant/limits` gives only object counts (200 checks, 22 metric labels), not the execution allowance |
 
 ## Budget
 
@@ -70,7 +76,7 @@ the conclusion. Re-read it if a stack is added.
 |---|---|---|---|---|---|
 | Series, exporters after the allowlist — **measured** | 88 (8 containers) | 66 (6 containers) | 154 | | |
 | Series, estimated once deployed (+ `alloy`, `probes`, bpvps1's `backup`, and the textfile series) | ~136 | ~106 | **~242** | 10,000 | **~97.6%** |
-| Synthetic Monitoring series (11 checks × 3 probes + 4 × 1 probe) | | | _pending — read `grafanacloud_instance_active_series` after apply_ | | |
+| Synthetic Monitoring series (15 checks × 1 probe since #42, was 11 × 3 + 4 × 1) | | | _pending — read `grafanacloud_instance_active_series` after apply; #42 cuts the probe dimension from 3 to 1, so this should fall_ | | |
 | Container logs, bytes in the last 24 h — **measured** | 2.0 MB (wordpress 1.6 MB, stalwart 0.36 MB) | 7 KB | ~2 MB/day ≈ **60 MB/month** | 50 GB | **~99.9%** |
 | **Measured in Grafana Cloud, 2026-09-15** (1 day, see above) | 154 | 128 | **1,569 total**, incl. Synthetics and Grafana's own series | 10,000 | **84.3%** |
 | Database Observability (#166), **estimated** — see its section | | ~1,100 | ~1,100 | | _re-read after deploy_ |
@@ -257,8 +263,10 @@ it does not keep.
 ## External checks
 
 The ten-week VPS1 outage had every container healthy and every domain answering 404. Nothing on
-the host can see that. **Grafana's own probes, outside our network, request every public name
-every minute** — from Singapore, Tokyo and Mumbai (`probes:` in `grafana/synthetic/endpoints.yml`).
+the host can see that. **Grafana's own probes, outside our network, request every public name** —
+from **Singapore** (`probes:` in `grafana/synthetic/endpoints.yml`), the two booking `/health`
+names every **2 minutes** and the other thirteen every **15**. Why those numbers, and what they
+cost in detection time, is "Cadence and the free-tier budget" below.
 
 **The list of names is derived, never typed.** `vps/shared/public-endpoints.py` reads every
 Traefik router on bpvps1 and bpvps2 — compose labels, fanout per destination, and the file
@@ -271,15 +279,17 @@ with no other edit. CI fails when:
   `.env` files; read them with `docker inspect <container>` and its `traefik.*.rule` label;
 - a registry domain is `skip`ped, a skip has no reason, or an entry names no router;
 - an `off_platform:` entry (below) has no reason or no platform, names a platform that is a VPS
-  host key, appears under `endpoints:` as well, or names something a router here *does* serve.
+  host key, appears under `endpoints:` as well, or names something a router here *does* serve;
+- an entry in either block carries a key the file does not know (a typo'd `frequncy:` is a check
+  running at a cadence nobody chose), or a `frequency` that does not parse or is under 10 s.
 
 ```bash
 python vps/shared/public-endpoints.py        # the names, the host each is on, the URL probed
 ```
 
 Each check: `GET https://<name>/` — or the `path:` an entry under `endpoints:` names instead —
-redirects followed, **fail on plain HTTP**, 10 s timeout,
-labels `host` and `managed_by=infrastructure`. The job name is the hostname. `grafana-apply.py`
+redirects followed, **fail on plain HTTP**, 10 s timeout, labels `host`, `cadence` and
+`managed_by=infrastructure`. The job name is the hostname. `grafana-apply.py`
 creates, updates, and deletes a managed check whose router is gone; a hand-made check is never
 touched.
 
@@ -289,7 +299,7 @@ but neither name has a DNS record (2026-09-14), so nothing outside can reach the
 **Probed somewhere other than `/`:** `api.dev.reservetoday.app` and `api.reservetoday.app` are
 probed at **`/health`**. `/` answers 200 from Hono without touching Postgres, so a backend whose
 database was gone probed as healthy; `/health` runs `SELECT 1` and answers 503 when it is not
-(booking-system#166). This is what makes `endpoint-down` the "API down" alert for booking — see
+(booking-system#166). This is what makes `endpoint-down-2m` the "API down" alert for booking — see
 "Alerts" above for why there is no second, booking-labelled copy of that rule.
 
 ### Names we do not host: `off_platform:` (#37)
@@ -298,7 +308,8 @@ booking-system's two frontends are Next.js apps on **Vercel**, so no Traefik rou
 them and nothing can derive them. They are the one thing typed by hand, in a block of their own so
 the derived list stays the source of truth for everything self-hosted. Each entry carries a
 mandatory `reason` and a mandatory `platform` (which becomes the check's `host` label), and may
-override `path`, `probes` and `frequency`.
+override `path`, `probes` and `frequency`. Since #42 all four take the file-wide defaults —
+Singapore, every 15 minutes — so none of them overrides anything but `path`.
 
 | Name | Serves | Probed at | Why this URL |
 |---|---|---|---|
@@ -320,16 +331,67 @@ directly, so the check asserts the page renders rather than that a redirect exis
 > checks cover. Closing that gap needs a slug-free route on fe-client that exercises one real
 > Tenant lookup without naming it — a booking-system ticket, not this repository.
 
-**One probe, not three.** Grafana Cloud free allows 100,000 check executions a month, counted per
-probe per run; a 30-day month is 43,200 minutes, so one name from one probe every 60 s is 43,200
-executions. The derived checks are already `11 × 3 × 43,200 = 1,425,600`/month — **14× the free
-tier before these four exist**, so there is no spare budget to fit them into. They therefore run
-from **Singapore only**: `4 × 1 × 43,200 = 172,800`/month, against `518,400` at three probes.
-The full arithmetic, and why the interval is *not* the knob that was turned (the `endpoint-down`
-window is two minutes and Synthetic Monitoring's push lag is ~1 minute, so anything slower than
-60 s makes the alert flicker instead of fire), is recorded in `grafana/synthetic/endpoints.yml`.
-The account is on a Pro trial, so nothing is throttled today — **read Synthetics usage at the
-account before the trial ends and decide the cadence of all fifteen there.**
+### Cadence and the free-tier budget (#42)
+
+Grafana Cloud free allows **100,000 Synthetic Monitoring executions a month, counted per probe
+per run**. A 30-day month is 43,200 minutes, so the entire allowance is about **2.3 executions a
+minute** across every check. One name, one probe, every 60 s is 43,200 — 43% of it.
+
+**Read at the account on 2026-09-20** (`GET /api/v1/check/list` on the Synthetic Monitoring API,
+the tenant's own record of what it runs): 15 checks, 11 of them from 3 probes and 4 from 1, every
+one at 60 s.
+
+| | Before | After |
+|---|---|---|
+| `api.dev` + `api` (`/health`) | 2 × 3 × 43,200 = 259,200 | **2 × 1 × 21,600 = 43,200** (every 2 min) |
+| Everything else | 9 × 3 × 43,200 + 4 × 1 × 43,200 = 1,339,200 | **13 × 1 × 2,880 = 37,440** (every 15 min) |
+| **Total / month** | **1,598,400** — 16× the allowance | **80,640** — 81%, ~19,360 spare |
+
+That is about **six more names at 15 minutes** before the free tier is gone.
+`python vps/shared/public-endpoints.py` prints this total on every run, so the price of adding a
+check is visible at the moment it is added.
+
+**What it costs, honestly:**
+
+- **One probe, not three.** "Fires only when every probe fails, so one probe's own network
+  trouble is not a page" was the premise `grafana/rules/endpoints.yml` was written on, and it is
+  no longer true. With a single probe a flaky hop out of Singapore is indistinguishable from an
+  outage. What survives is the window — two consecutive failures, never one.
+- **Detection is slower.** The #24 test measured a phone alert 2 min 37 s after Traefik stopped.
+  At a 2-minute cadence that becomes roughly **6–7 minutes** for the booking APIs, and up to
+  **~31 minutes** for everything else. Fifteen minutes of a dead webmail page will go unnoticed.
+  That is the trade being bought.
+- **Paying for Synthetic Monitoring is the other real option** if the slower cadence hurts. It
+  should be a decision, not something arrived at by forgetting a trial's end date.
+
+**⚠️ The window has to grow with the interval, and this is the part that breaks quietly.**
+`max_over_time(probe_success[2m])` over a series that only updates every 15 minutes is empty at
+most evaluations — the alert would flicker on staleness instead of firing on failure. So:
+
+- one `endpoint-down` rule **per cadence** — `endpoint-down-2m`, `endpoint-down-15m` — each with
+  a window of **2 × interval + 1 min** of Synthetic Monitoring push lag (5 m and 31 m);
+- every check carries its cadence as a `cadence` label, and each rule matches on it, so a check
+  is covered by exactly one rule;
+- `sm_check_info` is pushed per run too, so the joins read `last_over_time(sm_check_info[window])`
+  rather than the bare selector, which would be stale for Prometheus's 5-minute instant lookback.
+  Same for `probe_ssl_earliest_cert_expiry` in `tls-expiry` and in the dashboard.
+
+`scripts/test_grafana_apply.py` fails the build if a cadence in use has no rule, if a rule covers
+a cadence nothing uses, if a window is not `2 × interval + 1m`, if a join reads `sm_check_info`
+instantly, if the Endpoints dashboard's own windows are narrower than the slowest cadence, or if
+a rule's `relativeTimeRange` is shorter than its own window. **Adding a third cadence means
+adding a rule**, and CI will say so.
+
+**Synthetic Monitoring accepts 30 s to 1 h** for an HTTP check — measured against the account on
+2026-09-20, not read off a docs page. `public-endpoints.py` enforces that range, so a
+`frequency: 2h` fails in CI rather than mid-apply. To check any check setting cheaply without
+writing anything, `POST <GRAFANA_SM_URL>/api/v1/check/validate` with a check body answers
+`{"valid": true|false, "findings": […]}`.
+
+> ⚠️ **The first apply after a cadence change can page.** A rule matches `cadence="15m"` and no
+> series carries that label until each check has run once under the new config — up to fifteen
+> minutes, during which `noDataState: NoData` does exactly what it says. Run
+> `scripts/grafana-apply.py` in daylight and expect one NoData round.
 
 **Who renews each certificate** — where to look when `tls-expiry` fires:
 
@@ -375,7 +437,7 @@ The policy is deliberately short: a handful of rules, each meaning one thing a p
 | `memory-high` | warning | memory over 90%, held 15 min |
 | `postgres-connections` | warning | a Postgres over 80% of `max_connections`, held 5 min |
 | `mail-port-down` | critical | bpvps1's port 25, 465 or 993 failed two probes in a row from bpvps2 |
-| `endpoint-down` | critical | **every** probe failed a public name two runs in a row |
+| `endpoint-down-2m` / `endpoint-down-15m` | critical | the probe failed a public name two runs in a row — one rule per cadence, because the window has to be 2 × the interval + 1 min (#42) |
 | `tls-expiry` | warning | a served certificate has < 21 days left, held 10 min |
 | `backup-stale-<host>` | critical | a backup target's last success > 26 h old, or no heartbeat at all |
 | `tailscale-key-expiry` | warning | a node's `Self.KeyExpiry` is present |
@@ -393,8 +455,8 @@ channel (`grafana/rules/booking.yml`, from booking-system#166):
 | `booking-stripe-webhook-failed` | critical | **any** `level=error` line with `webhook=stripe` in 5 min |
 | `bk-job-<job>-<stg\|prd>` | warning | no `cron job ok` line for that job in 25 h, held 15 min — eight rules, four daily jobs × staging and prod |
 
-**"API down" is not in that table**, and that is deliberate: `endpoint-down` above already fires
-when every probe has failed `api.dev.reservetoday.app` or `api.reservetoday.app` twice in a row,
+**"API down" is not in that table**, and that is deliberate: `endpoint-down-2m` above already fires
+when the probe has failed `api.dev.reservetoday.app` or `api.reservetoday.app` twice in a row,
 which is what booking-system#166 asked for. It is an infra rule with no `app` label, so **a
 booking API outage arrives in the infra channel, not the booking one** — known, and the reason a
 duplicate booking-labelled copy was not added is that one outage would then send two messages
@@ -447,22 +509,24 @@ missing `app: booking` is not silent — it arrives in the infra channel, which 
 and harder to notice than silence. Every rule in `grafana/rules/booking.yml` carries
 `app: booking` in its static `labels:`, beside `severity`.
 
-The booking alerts that land in the **infra** channel on purpose are every `endpoint-down` over a
-booking name — `api.dev.reservetoday.app` / `api.reservetoday.app`, and since #37 the four
-`off_platform:` frontend names. `endpoint-down` is one rule covering every public name, so it
-carries no `app` label. See "Alerts", above.
+The booking alerts that land in the **infra** channel on purpose are every `endpoint-down-*` over
+a booking name — `api.dev.reservetoday.app` / `api.reservetoday.app` (the `2m` rule), and since
+#37 the four `off_platform:` frontend names (the `15m` one). Those rules are split by **cadence**,
+not by app, so neither carries an `app` label. See "Alerts", above.
 
 **Why the frontend checks did not get `app: booking` (#37).** A label is a property of a *rule*,
-not of a series, and `endpoint-down` is a single rule over every `probe_success` series. There is
-no way to label four of its instances and not the other eleven. Routing a frontend outage to
+not of a series, and `endpoint-down-15m` is a single rule over every `probe_success` series at
+that cadence. There is no way to label four of its instances and not the others. Routing a
+frontend outage to
 `#booking` would mean a second, job-scoped copy of a rule whose window, `for`, `noDataState` and
 probe-consensus reading were all argued out once — two rules over the same series, two Discord
 messages per outage, two thresholds to keep in step. `grafana/rules/booking.yml` §3 already
 refused exactly that trade for the booking **API**, which is the louder of the two. The frontends
 follow the API rather than invent a third answer: infra channel, no `app` label. If per-app
-routing for endpoint checks is ever wanted, the honest fix is to make `endpoint-down` carry the
-app as a label on the **check** (`sm_check_info`) and route on that — a change to the rule and to
-`grafana-apply.py`, not four hand-labelled duplicates.
+routing for endpoint checks is ever wanted, the honest fix is to make `endpoint-down-*` carry the
+app as a label on the **check** (`sm_check_info`) and route on that — a change to the rules and to
+`grafana-apply.py`, not four hand-labelled duplicates. #42's `cadence` label is that mechanism
+already working once: a property of the check, joined in and matched on.
 
 **Order in the tree is load-bearing.** Grafana stops at the first matching sibling policy, and
 every app alert also carries a `severity`, so the `app` routes sit *above* the severity routes; an
@@ -518,7 +582,9 @@ report.
 3. Every port at once and Stalwart looks healthy: the Hostinger firewall group 319466 (shared with
    bpvps2), or a Stalwart ban on bpvps2's address — see "Mail ports" above.
 
-**`endpoint-down`** — a public name fails from every Grafana probe.
+**`endpoint-down-2m` / `endpoint-down-15m`** — a public name fails from the Grafana probe, twice
+in a row. The uid says the cadence, so it also says how stale the news is: up to ~31 minutes on
+the `15m` rule.
 1. **Every name on the host at once?** Traefik or the host: `ssh bp-<host> 'docker ps; docker logs --tail 50 traefik'`.
    A multi-argument `Host()` kills a router silently — it is in that log.
 2. One name: its container (`container-down` alongside?), its router rule, its DNS record.
@@ -655,7 +721,7 @@ own addresses. **No address is committed here** — this repository is public.
 
    As configured on 2026-09-14, extended 2026-09-20: two contact points, `discord` (infra) and
    `discord-booking`, identical in format and differing only in webhook. Both run the same three
-   severity tiers: `critical` → 10s group wait (the `endpoint-down` timing in
+   severity tiers: `critical` → 10s group wait (the `endpoint-down-*` timing in
    `grafana/rules/endpoints.yml` needs it), `warning` → 1m, `info` → 5m and a day between
    repeats, because `info` is the textfile canary and it is *meant* to fire during the seam test.
 
@@ -735,7 +801,8 @@ window** agreed in advance, and is recorded here.
 | Rules evaluate | Local pipeline (Alloy v1.19.2 → Prometheus v3.5.0) with fabricated `.prom` files, 2026-09-14: `probes-stale` named exactly the two stale probes; `postgres-connections` 85; `mail-port-down` only the port at 2; all 18 expressions pass `promtool check rules` | done (local) |
 | Mail port down | Announced window on bpvps1 — interrupts mail. Not run by default: the prober is proven above, and stopping Stalwart to prove the rule costs real mail. If run: `docker stop stalwart`, alert within ~3 min, `docker start stalwart` | _not scheduled_ |
 | Agent overhead | `docker stats --no-stream alloy probes` over a week, both hosts | _pending deploy_ |
-| **Traefik stopped → phone alert (#24, the headline test)** | Announced window — interrupts the booking API. Silence nothing. `ssh bp-bpvps2 'docker stop traefik'`, note the time. Pass: `endpoint-down` for `api.reservetoday.app` and `api.dev.reservetoday.app` reaches the **phone** within 5 min, naming **bpvps2**. Then `ssh bp-bpvps2 'docker start traefik'` at once, and confirm it resolves. `container-down-bpvps2` for `traefik` fires too — expected | **PASS, 2026-09-14** (times UTC). `docker stop traefik` 15:07:46. `Public endpoint failing` reached `Alerting` for **both** `api.reservetoday.app` and `api.dev.reservetoday.app` at **15:10:23 — 2 min 37 s**, against a 5 min bar. **The Discord message arrived on the phone**, which is the leg no API check can prove: two lines, `🔴 Public endpoint failing (2)`, naming bpvps2. `docker start traefik` 15:10:23; alert back to `inactive` within ~60 s; both sites answering 200. Traefik was down **2 min 37 s** total. This is the VPS1 failure mode — every container healthy, every domain 404 — and it is now demonstrably caught |
+| **Traefik stopped → phone alert (#24, the headline test)** | Announced window — interrupts the booking API. Silence nothing. `ssh bp-bpvps2 'docker stop traefik'`, note the time. Pass: `endpoint-down` for `api.reservetoday.app` and `api.dev.reservetoday.app` reaches the **phone** within 5 min, naming **bpvps2**. Then `ssh bp-bpvps2 'docker start traefik'` at once, and confirm it resolves. `container-down-bpvps2` for `traefik` fires too — expected | **PASS, 2026-09-14** (times UTC). `docker stop traefik` 15:07:46. `Public endpoint failing` reached `Alerting` for **both** `api.reservetoday.app` and `api.dev.reservetoday.app` at **15:10:23 — 2 min 37 s**, against a 5 min bar. **The Discord message arrived on the phone**, which is the leg no API check can prove: two lines, `🔴 Public endpoint failing (2)`, naming bpvps2. `docker start traefik` 15:10:23; alert back to `inactive` within ~60 s; both sites answering 200. Traefik was down **2 min 37 s** total. This is the VPS1 failure mode — every container healthy, every domain 404 — and it is now demonstrably caught. **⚠️ Measured at the 60 s / 3-probe cadence, which #42 replaced.** The result stands as history; the timing does not. Re-proof is the row below |
+| **`endpoint-down` still fires at the new cadence (#42)** | Announced window, after `scripts/grafana-apply.py` has run and each check has executed once under the new config. Two targets, because the two rules are separate code paths. **`endpoint-down-2m`:** `ssh bp-bpvps2 'docker stop traefik'`, note the time, expect `Alerting` for both `api.*` names within ~7 min, then `docker start traefik`. **`endpoint-down-15m`:** the same on bpvps1's `wordpress` (`blog.kaiteki.my`, no other name depends on it), expect `Alerting` within ~31 min. Pass on each: the alert reaches `Alerting`, names the right host, and returns to `inactive` after the container is back. Fail: it flickers between `Alerting`, `Normal` and `NoData` — that is the stale-window failure the windows exist to prevent | _pending_ — the cadence change is in the files but has **not been applied**: `GRAFANA_SA_TOKEN` in `.env` returns 401 |
 | Textfile seam | [`textfile-metrics.md`](textfile-metrics.md), "Testing the seam" — no window needed. Pass: value queryable within a minute; `textfile-canary-stale` fires when left, resolves when refreshed | **Pass, 2026-09-14 on bpvps2** (times UTC). Written 14:04:44, queryable 14:05:44 — 60 s, one scrape interval. Left to age: `Pending` 14:10:32, **`Alerting` 14:11:34 — 6 min 50 s after the write**, ~50 s later than the documented 5 min + 1 min, which is scrape/evaluation alignment, not a missed alert. Rewritten 14:11:46, back to `Normal` 14:13:30 (1 min 44 s). `canary.prom` deleted 14:13:39; series gone and the rule inert by 14:14:55 |
 | Backup heartbeat (#27) | Blocked on the seam; run right after it. [`backup-restore.md`](backup-restore.md) | **Negative case observed live, 2026-09-14** — not simulated: bpvps1's backup stack deployed today and its first run is 04:30 KL, so it has no heartbeat yet. `count by (host) (backup_last_success_timestamp_seconds)` returns **bpvps2 only** (1 target, `booking-staging`); bpvps1 has no series. "Backup heartbeat stale on bpvps1" is **firing**, `Alerting` since 13:44:10 UTC — the absence half of the rule, exactly as intended. "Backup heartbeat stale on bpvps2" is **inactive** (`Normal (NoData)` = the query returns nothing, which is health). One host red, one green, each for the right reason. _The positive case — a real heartbeat on bpvps1 going stale and resolving — still needs the first 04:30 run._ |
 | TLS days vs `openssl` | Dashboard **Endpoints** → *TLS days left* for `api.reservetoday.app`, against `echo \| openssl s_client -servername api.reservetoday.app -connect api.reservetoday.app:443 2>/dev/null \| openssl x509 -noout -enddate`. Pass: same day count. `openssl` side on 2026-09-14: `notAfter=Nov 7 15:40:49 2026 GMT` (≈54 days) | **Pass, 2026-09-14.** `probe_ssl_earliest_cert_expiry{job="api.reservetoday.app"}` = `1794066049` from all three probes (Singapore, Tokyo, Mumbai) = **Nov 7 15:40:49 2026 UTC**, ≈54.1 days left — **identical to the second** to `openssl`'s `notAfter`. Checked against the raw metric, not the dashboard panel |
