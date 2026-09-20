@@ -33,14 +33,14 @@
           "refId": "A",
           "instant": true,
           "format": "table",
-          "expr": "(min by (job) (probe_ssl_earliest_cert_expiry) - time()) / 86400"
+          "expr": "(min by (job) (min_over_time(probe_ssl_earliest_cert_expiry[31m])) - time()) / 86400"
         }
       ]
     },
     {
       "type": "state-timeline",
       "title": "Up, from every probe",
-      "description": "1 when any probe succeeded in the last two minutes. Alert: endpoint-down, when every probe fails two runs in a row.",
+      "description": "1 when the probe succeeded in the last 31 minutes -- the same window the endpoint-down-15m rule uses, so a gap here is a real failure and not a check that has simply not run yet at the 15-minute cadence most names use (#42). Alert: endpoint-down-2m / endpoint-down-15m, when the probe fails two runs in a row.",
       "gridPos": {"x": 10, "y": 0, "w": 14, "h": 12},
       "datasource": {"type": "prometheus", "uid": "grafanacloud-prom"},
       "fieldConfig": {
@@ -54,7 +54,7 @@
         {
           "refId": "A",
           "legendFormat": "{{job}}",
-          "expr": "max by (job) (max_over_time(probe_success[2m]))"
+          "expr": "max by (job) (max_over_time(probe_success[31m]))"
         }
       ]
     }

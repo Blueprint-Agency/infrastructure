@@ -142,19 +142,21 @@ groups:
             Runbook: docs/monitoring.md.
 
   # ── 3. API down is NOT here. ───────────────────────────────────────────────────────────────
-  # grafana/rules/endpoints.yml's `endpoint-down` already covers it: Grafana's Singapore, Tokyo
-  # and Mumbai probes request api.dev.reservetoday.app and api.reservetoday.app every minute --
+  # grafana/rules/endpoints.yml's `endpoint-down-2m` already covers it: a Grafana probe in
+  # Singapore requests api.dev.reservetoday.app and api.reservetoday.app every two minutes --
   # both names are derived from bpvps2's Traefik routers, so the checks exist without anyone
-  # listing them -- and the rule fires when EVERY probe has failed at least two runs in a row.
-  # That is #166's "the backend synthetic check failing twice in a row", already written, already
-  # timed for a phone inside five minutes. A second rule over the same probe_success series would
-  # be two Discord messages for one outage and two thresholds to keep in step.
+  # listing them -- and the rule fires when the probe has failed at least two runs in a row.
+  # That is #166's "the backend synthetic check failing twice in a row", already written. It is
+  # the FAST cadence for that reason: #42 moved every other public name to fifteen minutes to
+  # stay inside the free tier, and kept these two at two, which puts a phone at roughly six to
+  # seven minutes rather than #24's measured 2m37s. A second rule over the same probe_success
+  # series would be two Discord messages for one outage and two thresholds to keep in step.
   #
   # What WAS missing is what the probe asked for. It requested `/`, which answers 200 from Hono
   # without touching Postgres, so a backend with a dead database read as healthy. Both names now
   # carry `path: /health` in grafana/synthetic/endpoints.yml -- that route runs `SELECT 1` and
   # answers 503 when the database is unreachable, so the existing rule now covers a dead database
-  # too. One consequence, written down rather than discovered at 2am: `endpoint-down` is an INFRA
+  # too. One consequence, written down rather than discovered at 2am: `endpoint-down-2m` is an INFRA
   # rule with no `app` label, so a booking API outage arrives in the infra channel, not the
   # booking one. docs/monitoring.md says so under "Where an alert lands".
 

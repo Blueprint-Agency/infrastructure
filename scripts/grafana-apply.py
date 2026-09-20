@@ -53,8 +53,11 @@ ENV_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 NOTIFICATIONS = "grafana/alerting/notifications.yml"
 # Every dashboard is saved into this folder -- the same one the alert rules name.
 DASHBOARD_FOLDER = "Monitoring"
-# Synthetic checks. Every minute from each probe: grafana/rules/endpoints.yml's window assumes it.
-SM_FREQUENCY, SM_TIMEOUT = "60s", "10s"
+# Synthetic checks. The cadence is per name, decided in grafana/synthetic/endpoints.yml against
+# the free tier's execution budget (#42); SM_FREQUENCY is only the fallback for an endpoint that
+# names none. The timeout is the same everywhere -- a slow answer is a failure at any cadence.
+# Spelled the way public-endpoints.py canonicalises it, since it is written as a label value.
+SM_FREQUENCY, SM_TIMEOUT = "1m", "10s"
 SM_MANAGED_BY = "infrastructure"
 
 
@@ -81,7 +84,7 @@ def folder_uid(title):
 def rule_group(group):
     """provisioning-file group -> (folder uid, group name, PUT rule-groups body)"""
     folder, name = folder_uid(group["folder"]), group["name"]
-    rules = []
+    rules, titles = [], {}
     for rule in group.get("rules") or []:
         if not rule.get("uid"):
             raise ValueError(f"group {name}: rule {rule.get('title')!r} has no uid -- "
@@ -92,6 +95,13 @@ def rule_group(group):
         if len(rule["uid"]) > 40:
             raise ValueError(f"group {name}: rule uid {rule['uid']!r} is "
                              f"{len(rule['uid'])} characters -- Grafana's limit is 40")
+        # Grafana keys alert rules on (org, folder, title) as well as uid, and rejects the PUT
+        # for a duplicate -- aborting an apply that has already written the earlier groups.
+        # Two rules with one title would also be indistinguishable in Discord.
+        if rule.get("title") in titles:
+            raise ValueError(f"group {name}: rules {titles[rule['title']]} and {rule['uid']} share "
+                             f"the title {rule['title']!r} -- Grafana requires it unique per folder")
+        titles[rule.get("title")] = rule["uid"]
         rules.append({**rule, "folderUID": folder, "ruleGroup": name, "orgID": group.get("orgId", 1)})
     return folder, name, {"title": name, "folderUid": folder,
                           "interval": seconds(group["interval"]), "rules": rules}
@@ -110,18 +120,21 @@ def probe_ids(names, probes):
 def sm_check(endpoint, probes):
     """derived endpoint {hostname, host, url} -> Synthetic Monitoring HTTP check body
 
-    An off_platform endpoint (grafana/synthetic/endpoints.yml, #37) may carry `probe_ids` and
-    `frequency` of its own -- fewer probes buy free-tier headroom for a name whose alert is
-    "read the provider's status page" rather than "ssh the host". Everything derived from a
-    Traefik router takes the file-wide values, and grafana/rules/endpoints.yml's 2-minute
-    window assumes the 60s default: see that file's budget note before overriding frequency.
+    Every endpoint carries a `frequency`, its cadence, chosen per name in
+    grafana/synthetic/endpoints.yml because the free tier counts executions per probe per run
+    (#42). It is also written as the `cadence` LABEL, because grafana/rules/endpoints.yml has
+    one endpoint-down rule per cadence -- a 2-minute window over a series that updates every
+    15 minutes is empty at most evaluations -- and that rule matches on this label. An
+    off_platform endpoint may additionally carry `probe_ids` of its own (#37).
     """
+    cadence = str(endpoint.get("frequency") or SM_FREQUENCY)
     return {
         "job": endpoint["hostname"], "target": endpoint["url"],
-        "frequency": seconds(endpoint.get("frequency") or SM_FREQUENCY) * 1000,
+        "frequency": seconds(cadence) * 1000,
         "timeout": seconds(SM_TIMEOUT) * 1000,
         "enabled": True, "probes": list(endpoint.get("probe_ids") or probes),
         "labels": [{"name": "host", "value": endpoint["host"]},
+                   {"name": "cadence", "value": cadence},
                    {"name": "managed_by", "value": SM_MANAGED_BY}],
         # The TLS and success metrics the rules and dashboard read are all basic metrics.
         "basicMetricsOnly": True,

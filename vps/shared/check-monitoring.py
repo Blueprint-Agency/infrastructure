@@ -184,8 +184,11 @@ def check_drift(hosts, problems):
 
 
 SYNTHETIC = "grafana/synthetic/endpoints.yml"
-# The rules an off-platform check depends on: both read probe_* / sm_check_info for every job.
-EXTERNAL_RULES = ("endpoint-down", "tls-expiry")
+# The rules an off-platform check depends on: all of them read probe_* / sm_check_info for every
+# job. `endpoint-down` is a PREFIX, not a uid: since #42 there is one rule per cadence
+# (endpoint-down-2m, endpoint-down-15m), and an off-platform name is covered by whichever
+# matches its own. Requiring a literal `endpoint-down` here would fail on a correct file.
+EXTERNAL_RULE_PREFIXES = ("endpoint-down", "tls-expiry")
 
 
 def check_off_platform(by_rule, hosts, problems):
@@ -196,16 +199,18 @@ def check_off_platform(by_rule, hosts, problems):
         return
     keys = {h["key"] for h in hosts}
     platforms = sorted({str((e or {}).get("platform") or "?") for e in off.values()})
-    for uid in EXTERNAL_RULES:
-        if uid not in by_rule:
+    for prefix in EXTERNAL_RULE_PREFIXES:
+        uids = sorted(u for u in by_rule if str(u).startswith(prefix))
+        if not uids:
             problems.append(f"{SYNTHETIC}: {len(off)} off-platform name(s) declared but no alert rule "
-                            f"{uid} under grafana/rules/ -- they would be probed and never alerted on")
+                            f"{prefix}* under grafana/rules/ -- they would be probed and never alerted on")
             continue
-        expr = "\n".join(by_rule[uid])
-        for key in sorted(k for k in keys if f'host="{k}"' in expr):
-            problems.append(f"{uid}: pinned to host=\"{key}\" -- an off-platform check's host label is "
-                            f"its platform ({', '.join(platforms)}), so {', '.join(sorted(off))} would "
-                            "be probed and never alerted on")
+        for uid in uids:
+            expr = "\n".join(by_rule[uid])
+            for key in sorted(k for k in keys if f'host="{k}"' in expr):
+                problems.append(f"{uid}: pinned to host=\"{key}\" -- an off-platform check's host label "
+                                f"is its platform ({', '.join(platforms)}), so {', '.join(sorted(off))} "
+                                "would be probed and never alerted on")
 
 
 def check_host(host, by_file, by_rule, problems):

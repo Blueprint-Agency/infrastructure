@@ -15,6 +15,7 @@ up unwatched:
 
 The last case runs the checker against this repository itself.
 """
+import importlib.util
 import json
 import pathlib
 import subprocess
@@ -24,6 +25,12 @@ import textwrap
 
 SCRIPT = pathlib.Path(__file__).with_name("public-endpoints.py")
 REPO = SCRIPT.parents[2]
+
+# Imported as well as run: the free-tier arithmetic (#42) is a pure function, and checking it
+# through a subprocess's printed total would only prove the formatting.
+_spec = importlib.util.spec_from_file_location("public_endpoints", SCRIPT)
+pe = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(pe)
 
 HOSTS = [
     {"key": "h1", "dir": "vps/h1", "env_name": "prod",
@@ -215,9 +222,15 @@ checks = {c["hostname"]: c for c in json.loads(out)}
 assert "www.vendor.example" in checks, sorted(checks)
 off = checks["www.vendor.example"]
 assert off["host"] == "paas" and off["url"] == "https://www.vendor.example/status", off
-assert off["probes"] == ["Singapore"] and off["frequency"] == "300s" and off["off_platform"] is True, off
-# The derived ones keep the file-wide probes and frequency -- no key of their own to override with.
+assert off["probes"] == ["Singapore"] and off["off_platform"] is True, off
+# 300s is written down as 5m: ONE canonical spelling per cadence, because the string is the
+# check's `cadence` label and the label is what the per-cadence endpoint-down rule matches (#42).
+# Two spellings would be two tiers, one of which no rule covers and nothing would report.
+assert off["frequency"] == "5m", off
+# The derived ones keep the file-wide probes -- no key of their own to override with -- and the
+# file-wide frequency, which this fixture does not set, so it is the one-minute default.
 assert "probes" not in checks["example.com"] and "off_platform" not in checks["example.com"]
+assert checks["example.com"]["frequency"] == "1m", checks["example.com"]
 
 # The reason is the whole point of the block: without it nobody can review, years later, why a
 # name nothing here serves is being probed from our budget. Same rule as skip:.
@@ -265,6 +278,61 @@ expect("off-platform probes that are not a list",
        repo(**{"grafana/synthetic/endpoints.yml": ENDPOINTS + OFF.replace(
            "probes: [Singapore]", "probes: Singapore")}),
        1, "www.vendor.example", "probes")
+
+# ── cadence and the free-tier budget (#42) ───────────────────────────────────────────────────
+# The file-wide frequency is the default for every check in both blocks, and an entry in either
+# may override it. The free tier counts executions per probe per run, so this is the only knob
+# that changes the bill other than the probe list.
+CADENCE = ENDPOINTS.replace("    vars:", "    frequency: 15m\n    probes: [Singapore]\n    vars:")
+CADENCE = CADENCE.replace("      mail.example.com:\n        path: /account\n",
+                          "      mail.example.com:\n        path: /account\n        frequency: 2m\n")
+rc, out = run(repo(**{"grafana/synthetic/endpoints.yml": CADENCE + OFF}), "--json")
+assert rc == 0, out
+checks = {c["hostname"]: c for c in json.loads(out)}
+assert checks["mail.example.com"]["frequency"] == "2m", checks["mail.example.com"]
+assert checks["example.com"]["frequency"] == "15m", checks["example.com"]
+assert checks["www.vendor.example"]["frequency"] == "5m", checks["www.vendor.example"]
+
+# ...and the bill those cadences add up to, which is what `public-endpoints.py` prints. A
+# 30-day month is 43,200 minutes; one probe every 15m is 2,880 executions, every 2m is 21,600.
+one = [{"frequency": "15m"}, {"frequency": "2m"}]
+assert pe.executions_per_month(one, ["Singapore"]) == 2880 + 21600
+# Probes multiply it -- three probes is three times the bill, which is why #42 cut the list to
+# one rather than only slowing the interval.
+assert pe.executions_per_month([{"frequency": "15m", "probes": ["a", "b", "c"]}], ["Singapore"]) == 8640
+
+# A frequency that does not parse, or one under Synthetic Monitoring's floor, fails in CI rather
+# than at apply time -- in EITHER block, and file-wide too.
+expect("endpoints frequency that is not a duration",
+       repo(**{"grafana/synthetic/endpoints.yml": CADENCE.replace("frequency: 2m", "frequency: soon")}),
+       1, "mail.example.com", "frequency")
+expect("file-wide frequency that is not a duration",
+       repo(**{"grafana/synthetic/endpoints.yml": CADENCE.replace("    frequency: 15m", "    frequency: 15")}),
+       1, "frequency")
+# Synthetic Monitoring accepts 30s..1h for an HTTP check (measured against the account with
+# POST /api/v1/check/validate, 2026-09-20). Outside it, CI has to say so: the alternative is a
+# cadence label and a matching endpoint-down rule written for a frequency the API then refuses.
+expect("frequency under Synthetic Monitoring's floor",
+       repo(**{"grafana/synthetic/endpoints.yml": CADENCE.replace("frequency: 2m", "frequency: 5s")}),
+       1, "mail.example.com", "30s to 3600s")
+expect("frequency over Synthetic Monitoring's ceiling",
+       repo(**{"grafana/synthetic/endpoints.yml": CADENCE.replace("frequency: 2m", "frequency: 2h")}),
+       1, "mail.example.com", "30s to 3600s")
+
+# ⚠️ A typo'd key is the quiet one: `frequncy: 2m` would leave the check on the file-wide
+# cadence -- a name running at an interval nobody chose, with nothing else in this repository
+# in a position to notice. So each block's vocabulary is closed.
+expect("typo'd key under endpoints",
+       repo(**{"grafana/synthetic/endpoints.yml": CADENCE.replace("        frequency: 2m", "        frequncy: 2m")}),
+       1, "mail.example.com", "unknown key")
+expect("an entry that is not a mapping at all",
+       repo(**{"grafana/synthetic/endpoints.yml": CADENCE.replace(
+           "      mail.example.com:\n        path: /account\n        frequency: 2m\n",
+           "      mail.example.com: /account\n")}),
+       1, "mail.example.com", "expected a mapping")
+expect("typo'd key under off_platform",
+       repo(**{"grafana/synthetic/endpoints.yml": CADENCE + OFF.replace("        path: /status", "        pth: /status")}),
+       1, "www.vendor.example", "unknown key")
 
 expect("this repository", REPO, 0)
 
