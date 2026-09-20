@@ -16,10 +16,29 @@
 --     'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres -v pw="$PW" -v booking_db="$POSTGRES_DB"' \
 --     < setup-db-o11y.sql
 --
+-- Run it as the container's $POSTGRES_USER, as the invocation above does: step 2's
+-- `ALTER ROLE ... SET pg_stat_statements.track` writes a SUSET parameter and step 4 reads
+-- pg_authid, both superuser-only. Rerunning this as a lesser role fails, by design.
+--
 -- What the role can and cannot do:
 --   CAN   read pg_stat_statements, pg_stat_activity and the system catalogs (pg_monitor)
 --   CANNOT read a single row of any booking table. No SELECT is granted, no pg_read_all_data,
 --         and NOBYPASSRLS. That is why explain_plans is off in config.alloy.
+--
+-- Why no object grants (Grafana's setup page asks for `GRANT SELECT ON ALL TABLES`, or
+-- `pg_read_all_data`, "for detailed data"): validated against **Alloy v1.19.2**, whose
+-- schema_details collector reads pg_catalog only (pg_namespace, pg_class, pg_attribute,
+-- pg_attrdef, pg_constraint, pg_index), which is world-readable, and discovers databases
+-- through has_database_privilege(datname,'CONNECT') -- satisfied by the GRANT CONNECT below.
+-- An Alloy bump must re-check that collector before the Dockerfile tag moves: were it to
+-- read information_schema instead, it would return nothing without object grants.
+--
+-- And granting pg_read_all_data would not be harmless. It does NOT set BYPASSRLS, and
+-- booking-system's migration 0033 puts ENABLE + FORCE ROW LEVEL SECURITY on every table
+-- carrying tenant_id, so those tables would read back empty for this role. What the grant
+-- WOULD expose is what 0033 leaves outside RLS -- the `tenants` / `tenant_settings` rows,
+-- i.e. each Tenant's identity, premises and branding copy -- plus any table with no
+-- tenant_id column. That, not "every Tenant's members and payments", is the reason to refuse.
 
 -- 1. The preload is live, or nothing below is worth doing.
 DO $$
@@ -55,9 +74,27 @@ GRANT CONNECT ON DATABASE :"booking_db" TO "db-o11y";
 \connect :"booking_db"
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 
--- 4. Verify, as the role: statistics readable, one row of booking data not.
+-- 4. Verify the grant actually took. NOT `count(*) > 0 FROM pg_stat_statements`: the
+--    extension grants SELECT on that view to PUBLIC, so it returns true even when the
+--    GRANT above silently did nothing -- the failure would then surface only as
+--    `<insufficient privilege>` in place of every query text in the Grafana UI.
+--
+--    This is Alloy's own probe (v1.19.2 health_check.go, monitoringUserPrivilegesQuery),
+--    which is also what Grafana's Database Observability troubleshooting page runs, plus
+--    the password-hash check. ALL FOUR COLUMNS MUST BE `t`.
+--
+--    Two statements, not one, because the two halves need different roles: pg_authid is
+--    superuser-only, while the redaction of other users' query text is a property of the
+--    CURRENT user and so has to be read as `db-o11y` itself.
+SELECT pg_has_role('db-o11y', 'pg_monitor',        'MEMBER') AS has_pg_monitor,
+       pg_has_role('db-o11y', 'pg_read_all_stats', 'MEMBER') AS has_pg_read_all_stats,
+       (SELECT rolpassword LIKE 'SCRAM-SHA-256%'
+          FROM pg_authid WHERE rolname = 'db-o11y')          AS password_is_scram;
+
 SET ROLE "db-o11y";
-SELECT count(*) > 0 AS pg_stat_statements_readable FROM pg_stat_statements;
+SELECT NOT EXISTS (
+         SELECT 1 FROM pg_stat_statements WHERE query = '<insufficient privilege>'
+       ) AS no_redacted_query_text;
 RESET ROLE;
 
 SELECT current_setting('compute_query_id')          AS compute_query_id,          -- on

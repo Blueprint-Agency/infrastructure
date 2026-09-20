@@ -194,8 +194,9 @@ schema details — for **both booking Postgres instances**, from its own stack o
 |---|---|
 | Why a separate stack | the `alloy` agent is on the host network and neither Postgres publishes a port; this one joins `booking-staging-network` and `booking-prod-network` and dials `booking-db-staging` / `booking-db-prod`. And the monitoring stack is one implementation on both hosts; only bpvps2 has these databases |
 | Postgres side | the booking compose's `command:` preloads `pg_stat_statements` with `compute_query_id=on`, `pg_stat_statements.track=all`, `track_activity_query_size=4096` — startup settings, so the next booking deploy restarts each Postgres once |
-| Monitoring role | `db-o11y`, `pg_monitor` only, `NOBYPASSRLS`, connection limit 10, a different password per instance. **It cannot read a row of booking data** — no `SELECT`, no `pg_read_all_data`. Created by hand once per instance with `setup-db-o11y.sql` (below) |
-| Collectors | `query_details`, `query_samples` (literals redacted — the default, keep it), `schema_details`, and the exporter's `stat_statements`, `database`, `stat_database`. **`explain_plans` is off**: `EXPLAIN` needs `SELECT` on every table it plans, which is read access to every Tenant's members and payments |
+| Monitoring role | `db-o11y`, `pg_monitor` only, `NOBYPASSRLS`, connection limit 10, a different password per instance (hygiene — blast radius and independent rotation; no Grafana or Postgres document requires it). **It cannot read a row of booking data** — no `SELECT`, no `pg_read_all_data`. Created by hand once per instance with `setup-db-o11y.sql` (below) |
+| Collectors | `query_details`, `query_samples` (literals redacted — the default, keep it), `schema_details`, and the exporter's `stat_statements`, `database`, `stat_database`. **`explain_plans` is off**: `EXPLAIN` needs `SELECT` on every table it plans. Grafana's alternative grant `pg_read_all_data` does **not** set `BYPASSRLS`, and booking-system's migration `0033` `FORCE`s row-level security on every `tenant_id` table — so it would read those back *empty*. What it would expose is what `0033` leaves outside RLS: the `tenants` / `tenant_settings` rows (each Tenant's identity, premises and branding copy) and any table with no `tenant_id`. That is the reason to refuse it |
+| Object grants skipped | Grafana's setup page also asks for `GRANT SELECT ON ALL TABLES` (or `pg_read_all_data`) "for detailed data". Skipped, and the schema tab still fills — but **only because Alloy v1.19.2's `schema_details` reads `pg_catalog`, never `information_schema`**. This is version-coupled: re-read that collector before the stack's `Dockerfile` tag moves |
 | Labels | `job="integrations/db-o11y"` (what Database Observability looks for), `instance` = `booking-staging` / `booking-prod`, `host` |
 | Budget | a keep-list in its `config.alloy` (`prometheus.relabel "keep"`). ~290 series per instance measured against a local Postgres; `stat_statements { limit = 100 }` bounds it near 540 each, **~1,100 for both**. Query samples and schema details are Loki lines, not series |
 | Not collected | Postgres's own server log (the `logs` collector wants `log_line_prefix` changed and a file to tail; its container log already reaches Loki through `alloy`) |
@@ -223,10 +224,24 @@ schema details — for **both booking Postgres instances**, from its own stack o
      < setup-db-o11y.sql
    # then the same with the prod password and booking-db-prod
    ```
-   Pass: `pg_stat_statements_readable = t`, `compute_query_id = on`, `pg_stat_statements_track = all`.
+   Pass: all four privilege columns `t` — `has_pg_monitor`, `has_pg_read_all_stats`,
+   `password_is_scram`, `no_redacted_query_text` — plus `compute_query_id = on`,
+   `pg_stat_statements_track = all`, `track_activity_query_size = 4096`. (The old check,
+   `count(*) > 0 FROM pg_stat_statements`, proved nothing: the extension grants that view to
+   `PUBLIC`, so it passed even when `GRANT pg_monitor` had not taken.)
 5. **Verify**: `ssh bp-bpvps2 'docker logs --tail 50 db-observability'` shows no `failed to ping
    database`; Grafana Cloud → **Database Observability → Configuration → Telemetry status** passes
    for `booking-staging` and `booking-prod`; **Queries overview** lists queries within a few minutes.
+
+   Also check the connection limit, which is a guess and not a measurement:
+   ```bash
+   ssh bp-bpvps2 "docker logs db-observability 2>&1 | grep -i 'too many connections'"
+   ```
+   `CONNECTION LIMIT 10` on the role is unvalidated: the exporter's autodiscovery scrapes every
+   database, and `schema_details` opens a **separate connection per discovered database**, on top
+   of the component's own pool. With two databases (`postgres` and the booking one) 10 should
+   hold. If that grep matches, raise it —
+   `ALTER ROLE "db-o11y" CONNECTION LIMIT 20;` on that instance — and say so here.
 
 If a Database Observability view stays empty while telemetry status passes, the keep-list is the
 first suspect: it names what leaves the host, and a newer Database Observability may read a metric
