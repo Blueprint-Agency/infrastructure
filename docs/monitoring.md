@@ -348,7 +348,7 @@ channel (`grafana/rules/booking.yml`, from booking-system#166):
 |---|---|---|
 | `booking-error-rate` | warning | more than 20 `level=error` lines from a `booking-be` instance in 5 min |
 | `booking-stripe-webhook-failed` | critical | **any** `level=error` line with `webhook=stripe` in 5 min |
-| `booking-job-stale-<job>-<env>` | warning | no `cron job ok` line for that job in 25 h, held 15 min — eight rules, four daily jobs × staging and prod |
+| `bk-job-<job>-<stg\|prd>` | warning | no `cron job ok` line for that job in 25 h, held 15 min — eight rules, four daily jobs × staging and prod |
 
 **"API down" is not in that table**, and that is deliberate: `endpoint-down` above already fires
 when every probe has failed `api.dev.reservetoday.app` or `api.reservetoday.app` twice in a row,
@@ -536,7 +536,7 @@ change may be missing. Any single line fires this.
    only thing that writes that state. A rejected *signature* logs at `warn` and does not fire this
    rule — if signatures are being refused, the endpoint secret is wrong, not the handler.
 
-**`booking-job-stale-<job>-<env>`** — the backend's cron scheduler has not written a `cron job ok`
+**`bk-job-<job>-<stg|prd>`** — the backend's cron scheduler has not written a `cron job ok`
 line for that job in 25 hours. The rule's title names the job and the instance.
 1. Is the container even up? `ssh bp-bpvps2 'docker ps --filter name=booking-be-<env>; docker logs
    --tail 100 booking-be-<env> | grep -i cron'`. A crash-loop shows up as `container-restarting`

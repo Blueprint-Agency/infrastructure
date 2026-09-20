@@ -84,6 +84,12 @@ def rule_group(group):
         if not rule.get("uid"):
             raise ValueError(f"group {name}: rule {rule.get('title')!r} has no uid -- "
                              "without one every apply creates a duplicate")
+        # Grafana's own limit, and it is enforced on the PUT: a group whose first rules are
+        # fine and whose fourth is too long is rejected whole, after the earlier groups in the
+        # same run have already been written. Caught here so --dry-run catches it too.
+        if len(rule["uid"]) > 40:
+            raise ValueError(f"group {name}: rule uid {rule['uid']!r} is "
+                             f"{len(rule['uid'])} characters -- Grafana's limit is 40")
         rules.append({**rule, "folderUID": folder, "ruleGroup": name, "orgID": group.get("orgId", 1)})
     return folder, name, {"title": name, "folderUid": folder,
                           "interval": seconds(group["interval"]), "rules": rules}
