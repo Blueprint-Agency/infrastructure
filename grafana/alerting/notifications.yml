@@ -11,7 +11,13 @@
 #
 # One alerting path, by decision (#22): no second alerting vendor, no Telegram/ntfy/Pushover.
 # Discord is a Grafana-native contact point, so Grafana still owns routing, grouping and
-# silences -- Discord is only delivery, the same as email.
+# silences -- Discord is only delivery, the same as email. A SECOND Discord channel is a second
+# address on that same integration, not a second vendor: still one policy tree, one set of
+# silences, one template. Why per-app channels are the documented shape, with citations:
+# docs/research/grafana-multi-app-alert-routing.md.
+#
+# Adding an app: a webhook, a contact point beside `discord-booking`, one route block at the top
+# of the tree, and rules labelled `app: <name>`. Nothing else. docs/grafana-organization.md.
 #
 # ⚠️ Discord will not reliably wake anyone at 2am: phone Do Not Disturb silences it. Set that
 # server to "All Messages" and add it to the DND exceptions, or accept that overnight
@@ -21,7 +27,9 @@
 contact_points:
   - name: discord
     type: discord
-    settings:
+    # &discord_format is a YAML anchor: every other Discord contact point merges it and
+    # overrides only `url`, so one channel can never drift into a different message format.
+    settings: &discord_format
       url: ${DISCORD_WEBHOOK_URL}
 
       # Default Discord formatting dumps every label and annotation of every instance -- a wall
@@ -74,30 +82,73 @@ contact_points:
         {{- end }}
         {{- end }}
 
+  # booking-system's own alerts (Blueprint-Agency/booking-system#166), in their own channel so a
+  # deploy-time application alert does not bury a host running out of disk. Same format, same
+  # tree, same silences -- only the webhook differs.
+  - name: discord-booking
+    type: discord
+    settings:
+      <<: *discord_format
+      url: ${DISCORD_BOOKING_WEBHOOK_URL}
+
+# How long a tier waits before it speaks, written once and merged into both the infra routes and
+# every app's. grafana-apply.py reads only `contact_points` and `policy`, so this block is not a
+# third section of the file -- it exists purely to be anchored below. An app that quietly inherited Grafana's defaults instead (30s/5m/4h) would page
+# slower than the infra rules for the same severity word, and nobody would notice until it did.
+severity_timings:
+  # 10s, not the 30s default. grafana/rules/endpoints.yml is timed around it, and #24's
+  # acceptance test is "Traefik stopped -> alert on a phone within five minutes".
+  critical: &critical_timing
+    group_wait: 10s
+    group_interval: 5m
+    repeat_interval: 1h
+  warning: &warning_timing
+    group_wait: 1m
+    group_interval: 10m
+    repeat_interval: 12h
+  # info is the textfile canary, which is MEANT to fire during the seam test. It must never
+  # be urgent: slow first send, and a day between repeats.
+  info: &info_timing
+    group_wait: 5m
+    group_interval: 30m
+    repeat_interval: 24h
+
 # The routing tree. `group_by` includes `host` so a bpvps1 problem and a bpvps2 problem never
-# arrive as one message: they are two incidents and usually two causes.
+# arrive as one message: they are two incidents and usually two causes. Children inherit it; an
+# app alert carrying no `host` groups under the empty value, which is what we want, and
+# `grafana_folder` already keeps the Apps folder's alerts out of Monitoring's groups.
+#
+# ⚠️ ORDER IS LOAD-BEARING. Matching stops at the first matching child (Grafana: "Once a matching
+# policy is found, the system does not continue to look for sibling policies"; Alertmanager:
+# depth-first, left-to-right, `continue` false by default). Every app alert also carries a
+# `severity`, so an app route placed BELOW the severity routes would never be reached and its
+# channel would stay silent. App routes first, severity nested under each -- which is also the
+# documented ordering, most specific first. Sources: docs/research/grafana-multi-app-alert-routing.md.
 policy:
   receiver: discord
   group_by: [grafana_folder, alertname, host]
   routes:
-    # 10s, not the 30s default. grafana/rules/endpoints.yml is timed around it, and #24's
-    # acceptance test is "Traefik stopped -> alert on a phone within five minutes".
+    # ── Apps. One block each, matching the `app` label the rules carry. ────────────────────
+    # The label is the contract, not the folder: a rule filed anywhere reaches this channel if
+    # and only if it sets `app: booking`. A booking rule that forgets it falls through to the
+    # infra severity routes below and arrives in the infra channel -- wrong room, not silence.
+    # grafana/rules/booking.yml is separate work; this route exists ahead of it.
+    - receiver: discord-booking
+      matchers: [[app, "=", booking]]
+      routes:
+        - {receiver: discord-booking, matchers: [[severity, "=", critical]], <<: *critical_timing}
+        - {receiver: discord-booking, matchers: [[severity, "=", warning]], <<: *warning_timing}
+        - {receiver: discord-booking, matchers: [[severity, "=", info]], <<: *info_timing}
+
+    # ── Infrastructure: everything with no `app` label. ───────────────────────────────────
     - receiver: discord
       matchers: [[severity, "=", critical]]
-      group_wait: 10s
-      group_interval: 5m
-      repeat_interval: 1h
+      <<: *critical_timing
 
     - receiver: discord
       matchers: [[severity, "=", warning]]
-      group_wait: 1m
-      group_interval: 10m
-      repeat_interval: 12h
+      <<: *warning_timing
 
-    # info is the textfile canary, which is MEANT to fire during the seam test. It must never
-    # be urgent: slow first send, and a day between repeats.
     - receiver: discord
       matchers: [[severity, "=", info]]
-      group_wait: 5m
-      group_interval: 30m
-      repeat_interval: 24h
+      <<: *info_timing
