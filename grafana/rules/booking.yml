@@ -167,7 +167,7 @@ groups:
     # allowed to be 25 hours old does not need minute resolution.
     interval: 5m
     rules:
-      - uid: booking-job-stale-expirePackages-staging
+      - uid: bk-job-expirePackages-stg
         title: Booking job expirePackages not running (staging)
         condition: C
         data:
@@ -214,7 +214,7 @@ groups:
             booking-be-staging | grep -i cron'`. Then Explore -> grafanacloud-logs:
             `{container="booking-be-staging"} |= "cron job" | json | job="expirePackages"`.
 
-      - uid: booking-job-stale-sendLapsingAlerts-staging
+      - uid: bk-job-sendLapsingAlerts-stg
         title: Booking job sendLapsingAlerts not running (staging)
         condition: C
         data:
@@ -261,7 +261,7 @@ groups:
             booking-be-staging | grep -i cron'`. Then Explore -> grafanacloud-logs:
             `{container="booking-be-staging"} |= "cron job" | json | job="sendLapsingAlerts"`.
 
-      - uid: booking-job-stale-sendExpiredNotifications-staging
+      - uid: bk-job-sendExpiredNotifications-stg
         title: Booking job sendExpiredNotifications not running (staging)
         condition: C
         data:
@@ -308,7 +308,7 @@ groups:
             booking-be-staging | grep -i cron'`. Then Explore -> grafanacloud-logs:
             `{container="booking-be-staging"} |= "cron job" | json | job="sendExpiredNotifications"`.
 
-      - uid: booking-job-stale-flagExpiredWaivers-staging
+      - uid: bk-job-flagExpiredWaivers-stg
         title: Booking job flagExpiredWaivers not running (staging)
         condition: C
         data:
@@ -355,7 +355,7 @@ groups:
             booking-be-staging | grep -i cron'`. Then Explore -> grafanacloud-logs:
             `{container="booking-be-staging"} |= "cron job" | json | job="flagExpiredWaivers"`.
 
-      - uid: booking-job-stale-expirePackages-prod
+      - uid: bk-job-expirePackages-prd
         title: Booking job expirePackages not running (prod)
         condition: C
         data:
@@ -402,7 +402,7 @@ groups:
             booking-be-prod | grep -i cron'`. Then Explore -> grafanacloud-logs:
             `{container="booking-be-prod"} |= "cron job" | json | job="expirePackages"`.
 
-      - uid: booking-job-stale-sendLapsingAlerts-prod
+      - uid: bk-job-sendLapsingAlerts-prd
         title: Booking job sendLapsingAlerts not running (prod)
         condition: C
         data:
@@ -449,7 +449,7 @@ groups:
             booking-be-prod | grep -i cron'`. Then Explore -> grafanacloud-logs:
             `{container="booking-be-prod"} |= "cron job" | json | job="sendLapsingAlerts"`.
 
-      - uid: booking-job-stale-sendExpiredNotifications-prod
+      - uid: bk-job-sendExpiredNotifications-prd
         title: Booking job sendExpiredNotifications not running (prod)
         condition: C
         data:
@@ -496,7 +496,7 @@ groups:
             booking-be-prod | grep -i cron'`. Then Explore -> grafanacloud-logs:
             `{container="booking-be-prod"} |= "cron job" | json | job="sendExpiredNotifications"`.
 
-      - uid: booking-job-stale-flagExpiredWaivers-prod
+      - uid: bk-job-flagExpiredWaivers-prd
         title: Booking job flagExpiredWaivers not running (prod)
         condition: C
         data:
