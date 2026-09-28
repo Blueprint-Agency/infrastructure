@@ -20,19 +20,22 @@
 # Runbook: docs/backup-restore.md.
 
 targets:
-  # Every studio's real member and booking data. Covers booking_staging_pgdata.
+  # The staging instance. Wiped 2026-09-16 for the Clerk removal (booking-system #121):
+  # a fresh database, seed data only, like booking-prod. Covers booking_staging_pgdata.
   # role must be the owner (superuser): as booking_app, RLS makes pg_dump omit every
   # tenant's rows and still exit 0. The job checks.
   #
-  # Floor, measured 2026-09-13: live dump 327,605 B; the same schema with no data
-  # (--schema-only) 255,569 B; booking-prod, which holds only seed data, 282,750 B.
-  # 280K (286,720 B) sits above both of those and below live.
+  # Floor, measured 2026-09-16: after the wipe, 277,024 B; --schema-only (2026-09-13)
+  # 255,569 B. The old 280K floor sat above the wiped size and refused the deploy's
+  # pre-migration snapshot. 256K (262,144 B), as booking-prod: it catches a database
+  # left with its schema and nothing else, NOT a lost seed row. Raise it once staging
+  # holds studios again.
   - name: booking-staging
     kind: postgres
     container: booking-db-staging
     database: yoga-sadhana
     role: postgres
-    floor: 280K
+    floor: 256K
     # stripe_payments is the payments table.
     drill_tables: [tenants, clients, bookings, client_packages, stripe_payments]
 
