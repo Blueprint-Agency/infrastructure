@@ -81,8 +81,18 @@ declare "booking_postgres" {
     // re-read that collector before the Dockerfile's tag moves. Do not "fix" an empty
     // schema tab with pg_read_all_data.
     //
-    // query_samples REDACTS literals by default (disable_query_redaction = false); keep it so.
-    disable_collectors = ["explain_plans"]
+    // query_samples OFF since 2026-10-09: it is Loki lines, not series, and the series budget
+    // above never counted them. Measured: 6.17 GB/day of `op="query_association"` for the two
+    // instances -- 188 GB/month against the free tier's 50 -- against < 0.1 GB/day for every
+    // other container on both hosts combined. It used the whole month's allowance by Oct 9,
+    // Loki answered every push with `429 ... limit: 0 bytes/sec` until the month reset, and
+    // Synthetic Monitoring's probe, which writes its check logs to the same tenant, choked on
+    // the same 429 and stopped reporting on schedule (43 DatasourceNoData flaps in a day).
+    // What is lost is the "query samples" view; query_details and schema_details stay.
+    // If it ever comes back, it comes back with a measured daily volume written in
+    // docs/monitoring.md "Budget", and with `collect_interval` raised, not at the default.
+    // (It REDACTS literals by default -- disable_query_redaction = false -- keep it so.)
+    disable_collectors = ["explain_plans", "query_samples"]
   }
 
   loki.relabel "db" {

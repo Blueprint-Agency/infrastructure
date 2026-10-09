@@ -54,7 +54,7 @@ every run. Nothing on vps1-staging, vps2-prod or vps3-prod is watched.
 | | Documented (#22) | Confirmed at the account |
 |---|---|---|
 | Active metric series | 10,000 | _pending_ |
-| Logs ingested / month | 50 GB | _pending_ |
+| Logs ingested / month | 50 GB | **confirmed the hard way, 2026-10-09**: `grafanacloud_org_logs_included_usage` = 50, and when `grafanacloud_org_logs_usage` crossed it Loki set the tenant's ingestion limit to **0 bytes/sec** for the rest of the calendar month (`429 ... ingestion rate limit exceeded for user <id> (limit: 0 bytes/sec)` in every `alloy` log). The counter resets on the 1st, UTC. See "Budget" |
 | Metric retention | 13 months (some summaries say 14 days) | _pending_ |
 | Log retention | 30 days (some summaries say 14 days) | _pending_ |
 | Users | 3 | _pending_ |
@@ -78,8 +78,24 @@ the conclusion. Re-read it if a stack is added.
 | Series, estimated once deployed (+ `alloy`, `probes`, bpvps1's `backup`, and the textfile series) | ~136 | ~106 | **~242** | 10,000 | **~97.6%** |
 | Synthetic Monitoring series (15 checks × 1 probe since #42, was 11 × 3 + 4 × 1) | | | _pending — read `grafanacloud_instance_active_series` after apply; #42 cuts the probe dimension from 3 to 1, so this should fall_ | | |
 | Container logs, bytes in the last 24 h — **measured** | 2.0 MB (wordpress 1.6 MB, stalwart 0.36 MB) | 7 KB | ~2 MB/day ≈ **60 MB/month** | 50 GB | **~99.9%** |
+| Database Observability **logs** (#166), measured 2026-10-09, the 24 h before the cut-off | | **6.17 GB** (`op="query_association"`, from `query_samples`); every other stream on both hosts < 0.1 GB | **188 GB/month** | 50 GB | **−276%** — the whole allowance by the 9th |
 | **Measured in Grafana Cloud, 2026-09-15** (1 day, see above) | 154 | 128 | **1,569 total**, incl. Synthetics and Grafana's own series | 10,000 | **84.3%** |
 | Database Observability (#166), **estimated** — see its section | | ~1,100 | ~1,100 | | _re-read after deploy_ |
+
+> ⚠️ **Logs are a budget too, and this table only ever counted container stdout.** On
+> 2026-10-09 the `db-observability` stack's `query_samples` collector, which is Loki lines and
+> not series, had shipped 6 GB a day since the counter reset on Oct 1 and used the month's 50 GB
+> by 12:11. Loki then refused **every** log push from both hosts — and from Grafana's own
+> Synthetic Monitoring probe, which writes each check's log to the same tenant. The probe
+> choked on the 429s and reported a `probe_success` sample about every 16 minutes instead of
+> every 2, so `endpoint-down-2m` saw an empty window at most evaluations and `DatasourceNoData`
+> flapped 43 times in a day while every site was up. Grafana's status page said nothing,
+> correctly: nothing of theirs was broken. The collector is off (its `config.alloy` says why);
+> the `DatasourceNoData` silence on the two `endpoint-down-*` rules was set to expire
+> 2026-11-01 10:00 KL, after the reset. **A new log stream gets a measured bytes/day here
+> before it ships**, the same as a new metric family gets a series count. To read the state
+> of the inbox: Explore → `grafanacloud-usage` → `grafanacloud_org_logs_usage` (GB so far this
+> month) and `grafanacloud_logs_instance_discarded_bytes_per_second{reason="rate_limited"}`.
 
 The estimate above was ~242 for the two hosts; the hosts themselves came in at **282**, close
 enough. The rest of the 1,569 is Synthetic Monitoring and Grafana Cloud's own bookkeeping
@@ -208,10 +224,10 @@ schema details — for **both booking Postgres instances**, from its own stack o
 | Why a separate stack | the `alloy` agent is on the host network and neither Postgres publishes a port; this one joins `booking-staging-network` and `booking-prod-network` and dials `booking-db-staging` / `booking-db-prod`. And the monitoring stack is one implementation on both hosts; only bpvps2 has these databases |
 | Postgres side | the booking compose's `command:` preloads `pg_stat_statements` with `compute_query_id=on`, `pg_stat_statements.track=all`, `track_activity_query_size=4096` — startup settings, so the next booking deploy restarts each Postgres once |
 | Monitoring role | `db-o11y`, `pg_monitor` only, `NOBYPASSRLS`, connection limit 10, a different password per instance (hygiene — blast radius and independent rotation; no Grafana or Postgres document requires it). **It cannot read a row of booking data** — no `SELECT`, no `pg_read_all_data`. Created by hand once per instance with `setup-db-o11y.sql` (below) |
-| Collectors | `query_details`, `query_samples` (literals redacted — the default, keep it), `schema_details`, and the exporter's `stat_statements`, `database`, `stat_database`. **`explain_plans` is off**: `EXPLAIN` needs `SELECT` on every table it plans. Grafana's alternative grant `pg_read_all_data` does **not** set `BYPASSRLS`, and booking-system's migration `0033` `FORCE`s row-level security on every `tenant_id` table — so it would read those back *empty*. What it would expose is what `0033` leaves outside RLS: the `tenants` / `tenant_settings` rows (each Tenant's identity, premises and branding copy) and any table with no `tenant_id`. That is the reason to refuse it |
+| Collectors | `query_details`, `schema_details`, and the exporter's `stat_statements`, `database`, `stat_database`. **`query_samples` is off since 2026-10-09**: it shipped 6.17 GB of Loki lines a day and spent the free tier's whole month of logs in nine days (see "Budget") — the "query samples" view is the casualty. **`explain_plans` is off**: `EXPLAIN` needs `SELECT` on every table it plans. Grafana's alternative grant `pg_read_all_data` does **not** set `BYPASSRLS`, and booking-system's migration `0033` `FORCE`s row-level security on every `tenant_id` table — so it would read those back *empty*. What it would expose is what `0033` leaves outside RLS: the `tenants` / `tenant_settings` rows (each Tenant's identity, premises and branding copy) and any table with no `tenant_id`. That is the reason to refuse it |
 | Object grants skipped | Grafana's setup page also asks for `GRANT SELECT ON ALL TABLES` (or `pg_read_all_data`) "for detailed data". Skipped, and the schema tab still fills — but **only because Alloy v1.19.2's `schema_details` reads `pg_catalog`, never `information_schema`**. This is version-coupled: re-read that collector before the stack's `Dockerfile` tag moves |
 | Labels | `job="integrations/db-o11y"` (what Database Observability looks for), `instance` = `booking-staging` / `booking-prod`, `host` |
-| Budget | a keep-list in its `config.alloy` (`prometheus.relabel "keep"`). ~290 series per instance measured against a local Postgres; `stat_statements { limit = 100 }` bounds it near 540 each, **~1,100 for both**. Query samples and schema details are Loki lines, not series |
+| Budget | a keep-list in its `config.alloy` (`prometheus.relabel "keep"`). ~290 series per instance measured against a local Postgres; `stat_statements { limit = 100 }` bounds it near 540 each, **~1,100 for both**. Schema details are Loki lines, not series — small. Query samples were Loki lines too, and **6 GB a day of them**, which is why that collector is off |
 | Not collected | Postgres's own server log (the `logs` collector wants `log_line_prefix` changed and a file to tail; its container log already reaches Loki through `alloy`) |
 
 ### Turning it on — once, in this order
