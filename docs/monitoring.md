@@ -92,7 +92,12 @@ the conclusion. Re-read it if a stack is added.
 > flapped 43 times in a day while every site was up. Grafana's status page said nothing,
 > correctly: nothing of theirs was broken. The collector is off (its `config.alloy` says why);
 > the `DatasourceNoData` silence on the two `endpoint-down-*` rules was set to expire
-> 2026-11-01 10:00 KL, after the reset. **A new log stream gets a measured bytes/day here
+> 2026-11-01 10:00 KL, after the reset. The eight `bk-job-*` cron heartbeats in
+> `grafana/rules/booking.yml` read Loki and fired from 2026-10-10 13:16, 25 h after the last
+> accepted line, while every job logged `cron job ok` on both instances; they carry a silence
+> (`alertname=~"Booking job .* not running .*"`, `app=booking`) to the same expiry. The two
+> booking presence rules (error rate, Stripe webhook) are `noDataState: OK`, so they stay
+> quiet but are **blind** until the reset. **A new log stream gets a measured bytes/day here
 > before it ships**, the same as a new metric family gets a series count. To read the state
 > of the inbox: Explore → `grafanacloud-usage` → `grafanacloud_org_logs_usage` (GB so far this
 > month) and `grafanacloud_logs_instance_discarded_bytes_per_second{reason="rate_limited"}`.
