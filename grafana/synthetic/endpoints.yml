@@ -76,8 +76,6 @@ frequency: 15m
 vars:
   "*":
     BASE_DOMAIN: teeko.ai              # org variable, written into every stack's .env by CI
-  bpvps1/wordpress:
-    WP_HOST: blog.kaiteki.my
   bpvps2/booking-staging:
     BOOKING_FQDN: api.dev.reservetoday.app
   bpvps2/booking-prod:

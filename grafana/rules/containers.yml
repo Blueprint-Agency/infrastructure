@@ -20,8 +20,10 @@ groups:
     interval: 1m
     rules:
       # bpvps1: the mail platform (stalwart, bulwark, unbound -- all three are required), Kaiteki,
-      # WordPress. stalwart/traefik/wordpress are root-owned stacks CI does not deploy, but their
-      # containers report through the Docker socket like any other (verified 2026-09-14).
+      # and blog-redirect, which 301s the retired blog.kaiteki.my (WordPress was stopped in
+      # 2026-10; wordpress/wp-db are deliberately not here). stalwart/traefik are root-owned
+      # stacks CI does not deploy, but their containers report through the Docker socket like
+      # any other (verified 2026-09-14).
       # #29's nightly mail-store snapshot stops stalwart at 04:30: 4 s measured, well inside 3m.
       # Its ~13 min worst case fires this -- correctly, mail is down; `docker logs backup` first.
       - uid: container-down-bpvps1
@@ -44,8 +46,7 @@ groups:
                 or absent_over_time(container_last_seen{host="bpvps1", container="unbound"}[3m])
                 or absent_over_time(container_last_seen{host="bpvps1", container="kaiteki"}[3m])
                 or absent_over_time(container_last_seen{host="bpvps1", container="kaiteki-staging"}[3m])
-                or absent_over_time(container_last_seen{host="bpvps1", container="wordpress"}[3m])
-                or absent_over_time(container_last_seen{host="bpvps1", container="wp-db"}[3m])
+                or absent_over_time(container_last_seen{host="bpvps1", container="blog-redirect"}[3m])
                 or absent_over_time(container_last_seen{host="bpvps1", container="backup"}[3m])
           - refId: C
             relativeTimeRange:
