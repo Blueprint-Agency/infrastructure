@@ -9,18 +9,11 @@
 # above what an empty, freshly-created volume of the same kind measures (4K).
 
 targets:
-  # The Kaiteki WordPress blog. Covers wordpress_wp-db-data.
-  # Floor, measured 2026-09-14: live dump 49,037,512 B; posts, postmeta, users and terms
-  # alone 18,209,402 B; schema only 66,830 B. 16M (16,777,216 B) sits below the content
-  # tables by themselves and far above an empty install. Most of the rest is Rank Math's
-  # analytics cache, which a plugin reset may legitimately empty -- so it is not in the floor.
-  - name: wordpress
-    kind: mysql
-    container: wp-db
-    database: kaitekim_blog2
-    role: root
-    floor: 16M
-    drill_tables: [kbsb_posts, kbsb_postmeta, kbsb_users, kbsb_terms, kbsb_term_relationships, kbsb_comments]
+  # The Kaiteki WordPress blog (`wordpress`, mysql from wp-db) was a target here until it
+  # was retired in 2026-10: its posts moved to kaiteki.my/blog and the stack was stopped
+  # (stacks/blog-redirect/README.md). Its restic snapshots are kept: `restic forget` runs
+  # per target only when that target is backed up, so the last ones stay in R2. The
+  # stopped wordpress_wp-db-data volume is still on the host.
 
   # All mail for all three domains: Stalwart's RocksDB store. kind stalwart: the job STOPS
   # `container` for the snapshot, starts it again, and fails the target unless it answers.
