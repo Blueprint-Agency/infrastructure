@@ -469,7 +469,7 @@ channel (`grafana/rules/booking.yml`, from booking-system#166):
 |---|---|---|
 | `booking-error-rate` | warning | more than 20 `level=error` lines from a `booking-be` instance in 5 min |
 | `booking-stripe-webhook-failed` | critical | **any** `level=error` line with `webhook=stripe` in 5 min |
-| `bk-job-<job>-<stg\|prd>` | warning | no `cron job ok` line for that job in 25 h, held 15 min — eight rules, four daily jobs × staging and prod |
+| `bk-job-<job>-<stg\|prd>` | warning | no `cron job ok` line for that job in 25 h, held 15 min — six rules, three daily jobs × staging and prod |
 
 **"API down" is not in that table**, and that is deliberate: `endpoint-down-2m` above already fires
 when the probe has failed `api.dev.reservetoday.app` or `api.reservetoday.app` twice in a row,
@@ -741,9 +741,9 @@ line for that job in 25 hours. The rule's title names the job and the instance.
    `{container="booking-be-<env>"} |= "cron job" | json | job="<job>"` — a run that *failed*
    logs `cron job failed` at `error` instead, which is a different problem from a run that never
    happened, and `booking-error-rate` may be firing too.
-3. **All four jobs for one instance at once** means the scheduler or the process, not the job.
+3. **All three jobs for one instance at once** means the scheduler or the process, not the job.
    One job alone means that job's handler is throwing before it can report.
-> **What this rule does and does not prove.** The four daily jobs are registered on a shared
+> **What this rule does and does not prove.** The three daily jobs are registered on a shared
 > 15-minute slot grid (`be/src/jobs/local-time.ts`), and each tick logs `cron job ok` whether or
 > not any Tenant's local hour was due — the per-Tenant work is decided inside the run. So this is
 > a **heartbeat that the scheduler is alive**, roughly 96 lines a day per job, and 25 hours of
