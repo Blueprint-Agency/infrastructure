@@ -19,7 +19,8 @@ For every monitored host:
      exempt (an agent cannot report its own absence) -- and every one of its selectors
      carries host="<host>". A container nobody declared dies silently; a selector without
      the host matcher names an instance on the wrong machine.
-  4. The other rules that watch for silence exist for it too -- probes-stale-<host>, and
+  4. The other rules that watch for silence exist for it too -- probes-stale-<host>,
+     metrics-stale-<host> (the agent's metrics reaching Grafana Cloud at all, infra#40), and
      backup-stale-<host> where it runs the backup job -- every agent-collected metric in them
      pinned to host="<host>". absent_over_time without the host is satisfied by another host.
 
@@ -270,7 +271,9 @@ def check_host(host, by_file, by_rule, problems):
 
     # Silence can only be noticed by a rule that names the host: absent_over_time without a host
     # matcher is satisfied by the OTHER host's series. So these are written once per host.
-    wanted = ["probes-stale"] + (["backup-stale"] if any(
+    # metrics-stale is the one that notices the agent itself going quiet -- a revoked token, a
+    # dead agent -- which every other rule reads as health (infra#40).
+    wanted = ["probes-stale", "metrics-stale"] + (["backup-stale"] if any(
         (pathlib.Path(host["dir"]) / "stacks" / "backup" / f).is_file() for f in COMPOSE_FILES) else [])
     for prefix in wanted:
         uid = f"{prefix}-{key}"

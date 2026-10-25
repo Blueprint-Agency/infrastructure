@@ -9,6 +9,8 @@ the failures, because each is a way monitoring rots without anyone noticing:
   - a panel or rule reading a metric not allowlisted -> an empty panel, a rule that never fires
   - a container in a compose file the down-alert does not declare -> it can die silently
   - a down-alert selector without the host matcher  -> an alert that names the wrong instance
+  - a host with no metrics-stale rule               -> its agent can go quiet and every rule
+                                                       reads the quiet as health (infra#40)
   - an off-platform check with no rule to alert it  -> a name probed and watched by nobody
   - an endpoint rule pinned to host="<vps>"         -> the same, with the file looking correct
 
@@ -136,6 +138,8 @@ def heartbeat(uid, *exprs):
 
 
 PROBES_STALE = 'absent_over_time(probes_last_success_timestamp_seconds{host="h1"}[15m])'
+# The real rule reads node_memory_MemTotal_bytes; the fixture's allowlist carries node_cpu.
+METRICS_STALE = 'sum(count_over_time(node_cpu_seconds_total{host="h1"}[5m])) or vector(0)'
 
 
 def base(**over):
@@ -147,7 +151,8 @@ def base(**over):
         "vps/h1/stacks/monitoring/config.alloy": CONFIG,
         "grafana/dashboards/hosts.json": dashboard('sum by (host) (rate(node_cpu_seconds_total{mode!="idle"}[5m]))'),
         "grafana/rules/containers.yml": down("h1", ["app-web-staging", "app-web-prod", "proxy"]),
-        "grafana/rules/heartbeats.yml": heartbeat(["probes-stale-h1"], PROBES_STALE),
+        "grafana/rules/heartbeats.yml": heartbeat(["probes-stale-h1", "metrics-stale-h1"],
+                                                  PROBES_STALE, METRICS_STALE),
     }
     files.update(over)
     return repo(H1, {k: v for k, v in files.items() if v is not None})
@@ -267,16 +272,33 @@ expect("textfile metric read but not allowlisted",
 
 # The rules that watch for SILENCE cannot be written once for all hosts: absent_over_time has
 # to name the host, or a host whose agent never started matches nothing and fires nothing.
-# So each monitored host must carry its own -- probes-stale always, backup-stale when the host
-# runs a backup job -- each selector pinned to that host.
+# So each monitored host must carry its own -- probes-stale and metrics-stale always,
+# backup-stale when the host runs a backup job -- each selector pinned to that host.
 expect("no probes-stale rule for a monitored host",
-       base(**{"grafana/rules/heartbeats.yml": heartbeat(["probes-stale-other"],
-                                                         PROBES_STALE.replace("h1", "other"))}),
+       base(**{"grafana/rules/heartbeats.yml": heartbeat(["probes-stale-other", "metrics-stale-h1"],
+                                                         PROBES_STALE.replace("h1", "other"), METRICS_STALE)}),
        1, "probes-stale-h1")
 expect("probes-stale selector without host matcher",
-       base(**{"grafana/rules/heartbeats.yml": heartbeat(["probes-stale-h1"],
-                                                         "absent_over_time(probes_last_success_timestamp_seconds[15m])")}),
+       base(**{"grafana/rules/heartbeats.yml": heartbeat(["probes-stale-h1", "metrics-stale-h1"],
+                                                         "absent_over_time(probes_last_success_timestamp_seconds[15m])",
+                                                         METRICS_STALE)}),
        1, "probes-stale-h1", 'host="h1"')
+# metrics-stale is the rule that notices the AGENT going quiet (infra#40: a revoked token, and
+# 3.5 hours in which every other rule read the silence as health). A new host without one is
+# that incident waiting to happen again; one without its host matcher is satisfied by the other
+# host's samples and never fires.
+expect("no metrics-stale rule for a monitored host",
+       base(**{"grafana/rules/heartbeats.yml": heartbeat(["probes-stale-h1"], PROBES_STALE)}),
+       1, "metrics-stale-h1", "no alert rule")
+expect("metrics-stale selector without host matcher",
+       base(**{"grafana/rules/heartbeats.yml": heartbeat(
+           ["probes-stale-h1", "metrics-stale-h1"], PROBES_STALE,
+           "sum(count_over_time(node_cpu_seconds_total[5m])) or vector(0)")}),
+       1, "metrics-stale-h1", 'host="h1"')
+expect("metrics-stale pinned to another host",
+       base(**{"grafana/rules/heartbeats.yml": heartbeat(
+           ["probes-stale-h1", "metrics-stale-h1"], PROBES_STALE, METRICS_STALE.replace("h1", "h2"))}),
+       1, "metrics-stale-h1", 'host="h1"')
 BACKUP_STALE = 'absent_over_time(backup_last_success_timestamp_seconds{host="h1"}[15m])'
 with_backup = {"vps/h1/stacks/backup/docker-compose.yml": "services:\n  backup:\n    image: b\n    container_name: backup\n",
                "vps/h1/stacks/monitoring/metrics.allowlist": ALLOWLIST + "probes_last_success_timestamp_seconds\n"
@@ -284,8 +306,9 @@ with_backup = {"vps/h1/stacks/backup/docker-compose.yml": "services:\n  backup:\
                "grafana/rules/containers.yml": down("h1", ["app-web-staging", "app-web-prod", "proxy", "backup"])}
 expect("backup job but no backup-stale rule", base(**with_backup), 1, "backup-stale-h1")
 expect("backup job with its backup-stale rule",
-       base(**with_backup, **{"grafana/rules/heartbeats.yml": heartbeat(["probes-stale-h1", "backup-stale-h1"],
-                                                                        PROBES_STALE, BACKUP_STALE)}), 0)
+       base(**with_backup, **{"grafana/rules/heartbeats.yml": heartbeat(
+           ["probes-stale-h1", "metrics-stale-h1", "backup-stale-h1"],
+           PROBES_STALE, METRICS_STALE, BACKUP_STALE)}), 0)
 
 # The agent is one implementation. CI rsyncs only a stack's own directory, so every host carries
 # a copy -- and a fix that reached one copy leaves the other host running the bug. Only the
@@ -305,7 +328,9 @@ def two_hosts(**over):
             f"vps/{h}/stacks/monitoring/Dockerfile": "FROM grafana/alloy:v1\n",
             f"vps/{h}/stacks/monitoring/probes/bin/lib.sh": "echo probe\n",
             f"grafana/rules/containers-{h}.yml": down(h, ["proxy"]).replace("name: containers", f"name: containers-{h}"),
-            f"grafana/rules/heartbeats-{h}.yml": heartbeat([f"probes-stale-{h}"], PROBES_STALE.replace("h1", h))
+            f"grafana/rules/heartbeats-{h}.yml": heartbeat([f"probes-stale-{h}", f"metrics-stale-{h}"],
+                                                           PROBES_STALE.replace("h1", h),
+                                                           METRICS_STALE.replace("h1", h))
                                                  .replace("name: heartbeats", f"name: heartbeats-{h}"),
         })
     files.update(over)

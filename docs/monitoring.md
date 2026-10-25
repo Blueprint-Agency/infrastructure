@@ -467,6 +467,8 @@ The policy is deliberately short: a handful of rules, each meaning one thing a p
 | `series-budget` | warning | active series > 80% of the ceiling, held 1 h |
 | `logs-quota-budget` | warning | this month's logs ingested > 80% of the plan's included GB, held 15 min — or the usage figure cannot be read (infra#40) |
 | `logs-dropped` | critical | Loki refused logs for rate limiting at any point in the last 15 min — they are being thrown away now (infra#40) |
+| `metrics-stale-<host>` | critical | not one sample from that host's agent has reached Grafana Cloud in 5 min, held 4 min: about **10 min after it stops shipping**. A revoked or expired token, a dead agent, a dead host (infra#40) |
+| `metrics-received-zero` | critical | the account's metrics instance received no samples at all for 5 min, held 5 min. Grafana's side or the account; a backstop, **not** the token alarm (infra#40) |
 | `textfile-canary-stale` | info | only during the seam test |
 
 And booking-system's own, every one of them labelled `app: booking` so it lands in the booking
@@ -499,9 +501,10 @@ repo tells the two instances apart.
 
 **Why some rules are per host.** A rule that fires on a value that is present and too high
 (disk, memory, restarts) is written once for every host. A rule that must notice **silence** —
-a container gone, a heartbeat gone — has to name the host in `absent_over_time`, so
-`container-down-`, `backup-stale-` and `probes-stale-` exist once per host. CI requires them for
-every monitored host, and every selector in them must carry that host's `host=` matcher.
+a container gone, a heartbeat gone — has to name the host in its selector, so
+`container-down-`, `backup-stale-`, `probes-stale-` and `metrics-stale-` exist once per host. CI
+requires them for every monitored host, and every selector in them must carry that host's `host=`
+matcher.
 
 **How a rule's annotations are written.** `summary` names *what* is checked and nothing about
 its state (`Disk / on bpvps2`); `value` says what is wrong (`93% full`); `description` is the
@@ -744,6 +747,39 @@ No Data is `OK` — the series exists only while something is refused, so absenc
    shows who sent a spike. A deploy replay on a new container is the usual one-off.
 3. While it fires, treat every "no log line" alert as unproven rather than as a finding.
 
+**`metrics-stale-<host>`** — nothing from that host's `alloy` has reached Grafana Cloud for over
+five minutes, so every metric-based alert for the host is blind. This is the alert that was missing
+on 2026-09-20, when the agents' token was revoked and three and a half hours went by in silence
+(infra#40). Grafana evaluates it against what Grafana has received, so it needs nothing from the
+agent, the token or the host. It counts `node_memory_MemTotal_bytes{host="<host>"}` samples over
+5 minutes (5 when healthy) and fires at 0, held 4 minutes; `or vector(0)` and `noDataState:
+Alerting` mean an empty answer is a failure too, never health. It resolves on the first sample
+back, a minute or two after the agent ships again. `container-down-<host>` firing for every
+container on the host at the same moment is the same fact seen from another rule.
+1. **Both hosts at once?** Then it is the one thing they share: the `GRAFANA_CLOUD_API_TOKEN`
+   (revoked, expired, or rotated without recreating the agents) or Grafana Cloud.
+   `ssh bp-<host> 'docker logs --tail 20 alloy'`: `status=401 ... invalid token` is the token, so
+   follow "Rotating `GRAFANA_CLOUD_API_TOKEN`" below. A `429` is the logs allowance
+   (`logs-dropped`), which does not stop metrics, so it is not why this fired.
+2. **One host:** its agent or the host. `ssh bp-<host> 'docker ps -a --filter name=alloy; docker
+   logs --tail 50 alloy'`. A stopped or crash-looping `alloy`: `cd /root/stacks/monitoring &&
+   docker compose up -d alloy`. No SSH at all: the host or the tailnet (Hostinger console).
+3. A `401` on one host only: that host's `/root/stacks/monitoring/.env` holds a different token
+   from the other's. Someone rotated half-way.
+
+**`metrics-received-zero`** — Grafana Cloud's metrics instance received no samples at all for ten
+minutes. Read from `grafanacloud-usage` (`grafanacloud_instance_samples_per_second`), which Grafana
+writes about the account, so it depends on neither agent nor the metrics query path. **It is not
+the token alarm:** Synthetic Monitoring publishes with its own credential, and on 2026-09-20, with
+both agents refused, the instance still received ~23 samples/s (26 before). So this fires only
+when *nothing* arrives, from anyone.
+1. status.grafana.com, region `prod-ap-southeast-1`; the portal's usage and billing pages (a
+   suspended or downgraded account looks like this).
+2. `metrics-stale-<host>` firing on both hosts at the same time is the expected companion. If it
+   is not, the usage pipeline is wrong, not ingestion: check the next item.
+3. "The received-samples figure cannot be read": Connections → Data sources →
+   `grafanacloud-usage` → Test (and `logs-quota-budget` will be saying the same).
+
 **`textfile-canary-stale`** — only expected during the seam test. Delete `canary.prom`.
 
 **`booking-error-rate`** — a `booking-be` instance is logging more errors than a healthy one
@@ -811,8 +847,9 @@ own addresses. **No address is committed here** — this repository is public.
 ### First-time setup (once per Grafana Cloud stack)
 
 1. In the portal, create an **access policy** with scopes `metrics:write` and `logs:write`, and a
-   token under it. From the stack's **Details** page take the Prometheus remote-write URL and
-   user (instance ID) and the Loki push URL and user.
+   token under it (today's policy is `vps-agents-write`; replacing its token is "Rotating
+   `GRAFANA_CLOUD_API_TOKEN`" below). From the stack's **Details** page take the Prometheus
+   remote-write URL and user (instance ID) and the Loki push URL and user.
 2. Put them in **each host's GitHub Environment** (`bpvps1` and `bpvps2`) on
    `Blueprint-Agency/infrastructure`, per the `provision` skill — not org level, where every other
    repo in the org could read the token. Variables `GRAFANA_CLOUD_PROM_URL`,
@@ -867,6 +904,76 @@ Grafana Cloud → **Alerts & IRM → Alerting → Silences → New silence**, ma
 the mail host, not the prober — so a bpvps1 silence covers it. Never pause the rule itself — a
 paused rule is easy to forget; a silence expires.
 
+### Rotating `GRAFANA_CLOUD_API_TOKEN`
+
+One token, under the `vps-agents-write` access policy (`metrics:write`, `logs:write`), shared by
+**three containers on two hosts**: `alloy` on bpvps1, `alloy` on bpvps2, and `db-observability` on
+bpvps2. On 2026-09-20 the old token was revoked while its replacement was being made. Every agent
+got `401` and dropped everything for three and a half hours, and nothing alerted (infra#40).
+`metrics-stale-<host>` now fires about ten minutes into a mistake like that. The order below is
+there so the mistake does not happen: **new token everywhere, proven, and only then revoke the
+old one.**
+
+It lives in two places, and both must change:
+
+| Where | Why it matters |
+|---|---|
+| Secret `GRAFANA_CLOUD_API_TOKEN` in the **`bpvps1` and `bpvps2` GitHub Environments** on `Blueprint-Agency/infrastructure` | `deploy-infra.yml` writes it into each stack's `.env` from `ci/env.ci`, and **CI-owned keys win the merge**. Fix only the hosts, and the next deploy that touches `monitoring` or `db-observability` puts the old token back. If the old one is revoked by then, that is 2026-09-20 again |
+| `GRAFANA_CLOUD_API_TOKEN=` in `/root/stacks/monitoring/.env` on **both hosts**, and `/root/stacks/db-observability/.env` on **bpvps2** | CI deploys only on a push that touches a stack (there is no manual trigger), so a new secret reaches no host by itself. The running containers keep whatever they were **created** with |
+
+> ⚠️ **`docker restart` is not enough.** A container's environment is fixed when it is
+> *created*. A restart reuses it, old token and all, and `docker compose up -d` recreates only
+> when it notices the change. `--force-recreate` makes it unconditional. This is the step that is
+> easy to miss.
+
+1. **Create the new token. Do not touch the old one.** Grafana Cloud portal → Administration →
+   Users and access → **Cloud access policies** → `vps-agents-write` → **Add token**. Name it with
+   the date (`vps-agents-YYYY-MM-DD`). Copy it once; it is not shown again. If you give it an
+   expiry, write the date in this section: **nothing warns before a token expires.** Reading
+   token metadata takes a grafana.com Cloud Access Policy token, and this repository holds none
+   (see "Rules we did not write"). `metrics-stale-<host>` fires ~10 minutes *after* expiry.
+2. **GitHub Environments**, both. Each command prompts for the value and echoes nothing:
+   ```bash
+   gh secret set GRAFANA_CLOUD_API_TOKEN --env bpvps1 -R Blueprint-Agency/infrastructure
+   gh secret set GRAFANA_CLOUD_API_TOKEN --env bpvps2 -R Blueprint-Agency/infrastructure
+   gh secret list --env bpvps1 -R Blueprint-Agency/infrastructure   # "Updated" is today; same for bpvps2
+   ```
+3. **Each host's `.env`, then recreate.** bpvps1: `monitoring`. bpvps2: `monitoring` **and**
+   `db-observability`. The value is read without echo and handed to `awk` through its
+   environment, so it is never on a command line, in `ps`, or in shell history:
+   ```bash
+   ssh bp-<host>
+   umask 077                              # .env.new is never readable by anyone else
+   read -rs TOKEN; export TOKEN           # paste the new token
+   for stack in monitoring db-observability; do     # bpvps1 has no db-observability: skipped
+     cd /root/stacks/$stack || continue
+     awk 'BEGIN { FS = OFS = "=" }
+          $1 == "GRAFANA_CLOUD_API_TOKEN" { print $1, ENVIRON["TOKEN"]; next } { print }' .env > .env.new
+     mv .env.new .env
+     svc=$([ "$stack" = monitoring ] && echo alloy || echo db-observability)
+     docker compose up -d --no-build --force-recreate --no-deps "$svc"
+   done
+   unset TOKEN
+   ```
+   `--no-build` reuses the image already on the host. Both services set `pull_policy: build`, and
+   a rotation changes no file that goes into the image. `--no-deps` leaves `probes` alone.
+4. **Verify, on each host, a couple of minutes after the recreate.** The `Created` time is now,
+   and no `401`. A `429` is the logs allowance, not the token: it means the token was *accepted*.
+   ```bash
+   docker inspect alloy --format '{{.Created}}'        # and db-observability on bpvps2
+   docker logs --since 3m alloy 2>&1 | grep -c 'status=401'   # 0
+   ```
+   Then in Grafana → Explore → `grafanacloud-prom`:
+   `count_over_time(node_memory_MemTotal_bytes{host="<host>"}[5m])` climbs back to 5, and on
+   bpvps2 `count by (instance) (count_over_time(pg_up{job="integrations/db-o11y"}[5m]))` lists
+   `booking-staging` and `booking-prod`. Both `metrics-stale-*` rules read Normal.
+5. **Only now revoke the old token**, on the same access-policy page. Wait two minutes and repeat
+   step 4's `grep -c 'status=401'` on all three containers. A `401` now means something still
+   held the old token. Put the new one in its `.env` and recreate it, as in step 3.
+
+If it goes wrong half-way, `metrics-stale-<host>` says which host within ten minutes, and its
+runbook entry above reads the `alloy` log for you.
+
 ### Adding a host
 
 In the same commit (the `provision` skill onboards the host into CI first):
@@ -879,7 +986,8 @@ In the same commit (the `provision` skill onboards the host into CI first):
 2. `grafana/rules/containers.yml`: a `container-down-<host>` rule naming every container — run
    `python vps/shared/check-monitoring.py`, it lists the missing ones.
 3. `grafana/rules/textfile.yml`: `probes-stale-<host>`, and `backup-stale-<host>` if it runs the
-   backup job — copies of bpvps1's with the host swapped. The generic rules need nothing.
+   backup job; `grafana/rules/ingestion.yml`: `metrics-stale-<host>`. All are copies of bpvps1's
+   with the host swapped. The generic rules need nothing.
 4. If a named volume appears, the host's backup `targets.yml` needs a skip for
    `monitoring_alloy_data` (copy bpvps1's reason).
 5. The five `GRAFANA_CLOUD_*` values in the host's GitHub Environment.
@@ -919,6 +1027,7 @@ window** agreed in advance, and is recorded here.
 | Agent overhead | `docker stats --no-stream alloy probes` over a week, both hosts | _pending deploy_ |
 | **Traefik stopped → phone alert (#24, the headline test)** | Announced window — interrupts the booking API. Silence nothing. `ssh bp-bpvps2 'docker stop traefik'`, note the time. Pass: `endpoint-down` for `api.reservetoday.app` and `api.dev.reservetoday.app` reaches the **phone** within 5 min, naming **bpvps2**. Then `ssh bp-bpvps2 'docker start traefik'` at once, and confirm it resolves. `container-down-bpvps2` for `traefik` fires too — expected | **PASS, 2026-09-14** (times UTC). `docker stop traefik` 15:07:46. `Public endpoint failing` reached `Alerting` for **both** `api.reservetoday.app` and `api.dev.reservetoday.app` at **15:10:23 — 2 min 37 s**, against a 5 min bar. **The Discord message arrived on the phone**, which is the leg no API check can prove: two lines, `🔴 Public endpoint failing (2)`, naming bpvps2. `docker start traefik` 15:10:23; alert back to `inactive` within ~60 s; both sites answering 200. Traefik was down **2 min 37 s** total. This is the VPS1 failure mode — every container healthy, every domain 404 — and it is now demonstrably caught. **⚠️ Measured at the 60 s / 3-probe cadence, which #42 replaced.** The result stands as history; the timing does not. Re-proof is the row below |
 | **`endpoint-down` still fires at the new cadence (#42)** | Announced window, after `scripts/grafana-apply.py` has run and each check has executed once under the new config. Two targets, because the two rules are separate code paths. **`endpoint-down-2m`:** `ssh bp-bpvps2 'docker stop traefik'`, note the time, expect `Alerting` for both `api.*` names within ~7 min, then `docker start traefik`. **`endpoint-down-15m`:** the same on bpvps1's `wordpress` (`blog.kaiteki.my`, no other name depends on it), expect `Alerting` within ~31 min. Pass on each: the alert reaches `Alerting`, names the right host, and returns to `inactive` after the container is back. Fail: it flickers between `Alerting`, `Normal` and `NoData` — that is the stale-window failure the windows exist to prevent | **Applied 2026-09-20**, and the half of this that can be checked without an outage passes: all 15 checks carry the new frequency, one probe and a `cadence` label; each rule's own query, run against Prometheus, matches exactly its own checks (2 and 13) with none orphaned; every rule reads `inactive`, and **no NoData fired** during the changeover. The **outage** half is _pending_ a window |
+| **Agent token refused → `metrics-stale-bpvps1` (infra#40)** | bpvps1 only, ~15 min; no public path depends on `alloy`. Recreate only `alloy` with a bad token from a one-off shell override, so the `.env` is never edited: `cd /root/stacks/monitoring && GRAFANA_CLOUD_API_TOKEN=invalid-infra-40 docker compose up -d --no-build --force-recreate --no-deps alloy`. Pass: `status=401` in `docker logs alloy`; `metrics-stale-bpvps1` goes `Pending`, then `Alerting` within ~10 min of the recreate, naming bpvps1; `metrics-stale-bpvps2` stays Normal. Restore with the same command minus the override (the real `.env`): no new `401`, samples back, the rule Normal again. `container-down-bpvps1` fires for every container meanwhile, which is expected: it is the same fact | _pending — run after the apply_ |
 | Textfile seam | [`textfile-metrics.md`](textfile-metrics.md), "Testing the seam" — no window needed. Pass: value queryable within a minute; `textfile-canary-stale` fires when left, resolves when refreshed | **Pass, 2026-09-14 on bpvps2** (times UTC). Written 14:04:44, queryable 14:05:44 — 60 s, one scrape interval. Left to age: `Pending` 14:10:32, **`Alerting` 14:11:34 — 6 min 50 s after the write**, ~50 s later than the documented 5 min + 1 min, which is scrape/evaluation alignment, not a missed alert. Rewritten 14:11:46, back to `Normal` 14:13:30 (1 min 44 s). `canary.prom` deleted 14:13:39; series gone and the rule inert by 14:14:55 |
 | Backup heartbeat (#27) | Blocked on the seam; run right after it. [`backup-restore.md`](backup-restore.md) | **Negative case observed live, 2026-09-14** — not simulated: bpvps1's backup stack deployed today and its first run is 04:30 KL, so it has no heartbeat yet. `count by (host) (backup_last_success_timestamp_seconds)` returns **bpvps2 only** (1 target, `booking-staging`); bpvps1 has no series. "Backup heartbeat stale on bpvps1" is **firing**, `Alerting` since 13:44:10 UTC — the absence half of the rule, exactly as intended. "Backup heartbeat stale on bpvps2" is **inactive** (`Normal (NoData)` = the query returns nothing, which is health). One host red, one green, each for the right reason. _The positive case — a real heartbeat on bpvps1 going stale and resolving — still needs the first 04:30 run._ |
 | TLS days vs `openssl` | Dashboard **Endpoints** → *TLS days left* for `api.reservetoday.app`, against `echo \| openssl s_client -servername api.reservetoday.app -connect api.reservetoday.app:443 2>/dev/null \| openssl x509 -noout -enddate`. Pass: same day count. `openssl` side on 2026-09-14: `notAfter=Nov 7 15:40:49 2026 GMT` (≈54 days) | **Pass, 2026-09-14.** `probe_ssl_earliest_cert_expiry{job="api.reservetoday.app"}` = `1794066049` from all three probes (Singapore, Tokyo, Mumbai) = **Nov 7 15:40:49 2026 UTC**, ≈54.1 days left — **identical to the second** to `openssl`'s `notAfter`. Checked against the raw metric, not the dashboard panel |
