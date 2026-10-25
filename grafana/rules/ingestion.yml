@@ -1,5 +1,7 @@
-# Alerts on whether Grafana Cloud will TAKE the logs we ship (infrastructure#40). Applied by
-# scripts/grafana-apply.py; this file is the copy of record, not the web UI.
+# Alerts on whether what we ship REACHES Grafana Cloud (infrastructure#40): whether it will take
+# the logs (the first two rules), and whether each host's metrics are arriving at all (the rest,
+# "Metrics arriving", below). Applied by scripts/grafana-apply.py; this file is the copy of
+# record, not the web UI.
 #
 # ── Why this file exists ─────────────────────────────────────────────────────────────────────
 # On 2026-10-09 the free tier's 50 GB/month of logs ran out, and Loki then answered every push
@@ -22,7 +24,7 @@
 #                                                    bytes/s Loki refused, by reason
 #
 # ── No data ──────────────────────────────────────────────────────────────────────────────────
-# The two rules answer No Data differently, on purpose.
+# The two logs rules answer No Data differently, on purpose.
 #
 # logs-quota-budget: `Alerting`. The usage gauge is always present -- it, and the included
 # figure beside it, answered every query made on the day of writing -- so an empty result means
@@ -34,8 +36,46 @@
 # at all before the cut-off). Absence is the healthy state, so No Data must not alert. The
 # datasource itself vanishing is logs-quota-budget's job -- same datasource, and it alerts.
 #
-# No `app` label on either: logs are shared by every app, so these land in the infra channel
-# (grafana/alerting/notifications.yml, docs/monitoring.md "Where an alert lands").
+# ── Metrics arriving (the 2026-09-20 incident) ───────────────────────────────────────────────
+# From 03:28 to ~07:00 UTC on 2026-09-20 the agents' write token was revoked. `alloy` on both
+# hosts and `db-observability` logged only `status=401 ... invalid token` and dropped every
+# batch, and nothing alerted for three and a half hours. The rules below are evaluated by
+# Grafana against data Grafana holds, so when an agent goes quiet they see the quiet: they need
+# nothing from the agent, the token or the host. That is the property #40 asks for.
+#
+# metrics-stale-<host>: a HEARTBEAT, not absent_over_time. node_memory_MemTotal_bytes is one
+# series per host, scraped every 60 s by the host exporter inside `alloy`, allowlisted, and there
+# whatever containers run, so a healthy host has 5 samples in any 5 minutes (the 7 days to
+# 2026-10-25: never fewer, on either host). `sum(...)` drops every label and `or vector(0)` turns
+# "no series" into an explicit 0, so healthy and broken are the SAME labelless instance and the
+# alert moves Normal -> Pending -> Alerting on it. A `by (host)` query would not: the healthy
+# instance would vanish (Grafana reads that as resolved) and the zero would have no host to name.
+# The host is named by the static `host` label instead. noDataState is `Alerting` on top: the
+# query cannot return nothing any more, so No Data can only mean the datasource failed to answer,
+# and then nothing about the host can be trusted either. Silence is never read as health here.
+#   Timing: the count reaches 0 five minutes after the last sample, `for: 4m` holds it, so
+#   Alerting 9-10 minutes after the agent stopped shipping. It resolves on the first sample back.
+#   One per host, like container-down- and probes-stale-: CI (vps/shared/check-monitoring.py)
+#   requires a metrics-stale-<host> for every monitored host, its selector pinned to that host.
+#   It watches `alloy`, not bpvps2's db-observability, which shares the token: a revoked token
+#   stops both, and this fires; db-observability failing alone does not fire it.
+#
+# metrics-received-zero: the metrics instance's own received-samples rate, from
+# grafanacloud-usage. Nothing in it comes from our agents or through the grafanacloud-prom query
+# path. It is a BACKSTOP, and it would NOT have fired on 2026-09-20: Synthetic Monitoring
+# publishes with its own credential, so with both agents refused the instance still received ~23
+# samples/s (26 before; the hosts are the small share). It fires only when NOTHING arrives -- the
+# instance, the account or Grafana's ingest gone. A revoked agent token is metrics-stale-<host>'s.
+# No Data is `Alerting`: whether this series goes to 0 or disappears when nothing arrives has
+# never been observed, so both must fire.
+#
+# No logs-side twin of either. `grafanacloud_logs_instance_bytes_received_per_second` stayed at
+# ~2,600 B/s through 2026-09-20 (Synthetic Monitoring's logs again), and it counts bytes Loki
+# refuses too: ~6,300 B/s on 2026-10-25, with the allowance spent. A Loki query per host needs a
+# line every host writes on a schedule, and none does. Today it would also fire until the 1st.
+#
+# No `app` label on any rule here: logs and the agents are shared by every app, so these land in
+# the infra channel (grafana/alerting/notifications.yml, docs/monitoring.md "Where an alert lands").
 apiVersion: 1
 groups:
   - orgId: 1
@@ -132,3 +172,124 @@ groups:
             burst over the per-second limit: look at `grafanacloud_logs_instance_bytes_received_per_second`.
             Agents logging `429` is the same fact from the host side:
             `ssh bp-<host> 'docker logs --tail 20 alloy'`. Runbook: docs/monitoring.md.
+
+      # ── Metrics arriving. One heartbeat per host, then the account-wide backstop. ─────────
+      - uid: metrics-stale-bpvps1
+        title: No metrics arriving from bpvps1
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: sum(count_over_time(node_memory_MemTotal_bytes{host="bpvps1"}[5m])) or vector(0)
+          - refId: C
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: lt, params: [1]}
+        noDataState: Alerting
+        execErrState: Error
+        for: 4m
+        labels:
+          severity: critical
+          host: bpvps1
+        annotations:
+          summary: "Metrics from bpvps1 reaching Grafana Cloud"
+          value: "{{ with $values.A }}{{ humanize $values.A.Value }} samples in the last 5 minutes, 5 expected{{ else }}the query returned nothing{{ end }}"
+          description: >-
+            Nothing from bpvps1's agent has reached Grafana Cloud for over 5 minutes, so every
+            metric-based alert for the host is blind. Both hosts at once: the shared
+            GRAFANA_CLOUD_API_TOKEN (revoked or expired) or Grafana Cloud. `ssh bp-bpvps1
+            'docker logs --tail 20 alloy'`; `status=401 ... invalid token` is the token, see
+            "Rotating GRAFANA_CLOUD_API_TOKEN" in docs/monitoring.md. This host alone: its agent
+            or the host, `docker ps -a --filter name=alloy`; no SSH at all means the host.
+            container-down for every container on the host at once is the same fact.
+
+      - uid: metrics-stale-bpvps2
+        title: No metrics arriving from bpvps2
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: sum(count_over_time(node_memory_MemTotal_bytes{host="bpvps2"}[5m])) or vector(0)
+          - refId: C
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: lt, params: [1]}
+        noDataState: Alerting
+        execErrState: Error
+        for: 4m
+        labels:
+          severity: critical
+          host: bpvps2
+        annotations:
+          summary: "Metrics from bpvps2 reaching Grafana Cloud"
+          value: "{{ with $values.A }}{{ humanize $values.A.Value }} samples in the last 5 minutes, 5 expected{{ else }}the query returned nothing{{ end }}"
+          description: >-
+            Nothing from bpvps2's agent has reached Grafana Cloud for over 5 minutes, so every
+            metric-based alert for the host is blind, booking's Postgres and containers included.
+            Both hosts at once: the shared GRAFANA_CLOUD_API_TOKEN (revoked or expired) or
+            Grafana Cloud. `ssh bp-bpvps2 'docker logs --tail 20 alloy'`; `status=401 ... invalid
+            token` is the token, see "Rotating GRAFANA_CLOUD_API_TOKEN" in docs/monitoring.md
+            (db-observability on this host uses it too). This host alone: its agent or the host,
+            `docker ps -a --filter name=alloy`; no SSH at all means the host. container-down for
+            every container on the host at once is the same fact.
+
+      # Zero, read as under 0.01/s: a per-second rate is a float, and anything under one sample a
+      # minute in every minute of the window is nothing arriving. Healthy is ~20-30/s, and the
+      # lowest 5-minute maximum in the 30 days to 2026-10-25 was 2.8/s. 5m window + `for: 5m`:
+      # fires after ~10 minutes of nothing.
+      - uid: metrics-received-zero
+        title: Grafana Cloud is receiving no metrics
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: grafanacloud-usage
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: max(max_over_time(grafanacloud_instance_samples_per_second[5m]))
+          - refId: C
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: lt, params: [0.01]}
+        noDataState: Alerting
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Samples received by the Grafana Cloud metrics instance"
+          value: "{{ with $values.A }}at most {{ humanize $values.A.Value }} samples/s in the last 5 minutes{{ else }}the received-samples figure cannot be read{{ end }}"
+          description: >-
+            The account's metrics instance is receiving nothing at all: not from either agent,
+            and not from Synthetic Monitoring, which publishes with its own credential. That is
+            Grafana Cloud's side or the account (status.grafana.com; the portal's billing and
+            usage pages), not one host. metrics-stale-<host> firing on both hosts at the same
+            time is the expected companion. If the figure cannot be read: Connections -> Data
+            sources -> grafanacloud-usage -> Test. Runbook: docs/monitoring.md.
