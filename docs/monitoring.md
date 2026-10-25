@@ -96,6 +96,11 @@ the conclusion. Re-read it if a stack is added.
 > before it ships**, the same as a new metric family gets a series count. To read the state
 > of the inbox: Explore → `grafanacloud-usage` → `grafanacloud_org_logs_usage` (GB so far this
 > month) and `grafanacloud_logs_instance_discarded_bytes_per_second{reason="rate_limited"}`.
+> Both are now alerts (infra#40, `grafana/rules/ingestion.yml`): `logs-quota-budget` warns at 80%
+> of the month's allowance and `logs-dropped` fires while Loki is refusing pushes. They read
+> `grafanacloud-usage`, which Grafana writes about the account, so they keep working when the
+> agents are refused. They were applied on 2026-10-25, with the month already spent, so both
+> fire until the 1st resets the counter.
 
 The estimate above was ~242 for the two hosts; the hosts themselves came in at **282**, close
 enough. The rest of the 1,569 is Synthetic Monitoring and Grafana Cloud's own bookkeeping
@@ -460,6 +465,8 @@ The policy is deliberately short: a handful of rules, each meaning one thing a p
 | `probes-stale-<host>` | warning | a textfile probe has not completed within its own max age, or no probe heartbeat at all |
 | `textfile-unreadable` | warning | a `*.prom` file cannot be parsed, held 5 min |
 | `series-budget` | warning | active series > 80% of the ceiling, held 1 h |
+| `logs-quota-budget` | warning | this month's logs ingested > 80% of the plan's included GB, held 15 min — or the usage figure cannot be read (infra#40) |
+| `logs-dropped` | critical | Loki refused logs for rate limiting at any point in the last 15 min — they are being thrown away now (infra#40) |
 | `textfile-canary-stale` | info | only during the seam test |
 
 And booking-system's own, every one of them labelled `app: booking` so it lands in the booking
@@ -701,6 +708,41 @@ says which (`docker` → `container-restarting`, `postgres` → `postgres-connec
 1. Explore → `grafanacloud-prom`: `topk(10, count by (__name__) ({__name__=~".+"}))`.
 2. The last change to a `metrics.allowlist`, or a new container on several networks.
 3. The Synthetic Monitoring checks count too: 11 names × 3 probes, plus 4 off-platform × 1.
+
+**`logs-quota-budget`** — this month's logs are over 80% of the plan's allowance (50 GB on the
+free tier), so at the wrong stream's pace the rest of the month's logs are a day or two from being
+refused. Also fires if the usage figure itself cannot be read, because then nothing else warns.
+The counter resets on the 1st, UTC, and this resolves then. (infra#40; the rule is
+`grafana/rules/ingestion.yml`, and reads `grafanacloud-usage`, which does not depend on the agents
+or on Loki.)
+1. Explore → `grafanacloud-usage` → `grafanacloud_org_logs_usage` (GB so far this month) against
+   `grafanacloud_org_logs_included_usage`.
+2. Which stream grew? Explore → `grafanacloud-logs`:
+   `sum by (host, container) (bytes_over_time({host=~".+"}[1d]))`. Look at a day that was fully
+   ingested — once the allowance is spent the newest lines are the ones that never arrived. The
+   usual cause is a new or noisier stream (the 2026-10-09 one was `query_samples`, 6 GB a day).
+3. Cut the stream at the source (`config.alloy`'s `loki.process "select"`, or the collector's own
+   switch) — do not wait for the 1st. A firing `logs-dropped` alongside means it is too late for
+   this month; then it is about not losing the next one.
+4. "The usage figure cannot be read": Connections → Data sources → `grafanacloud-usage` → Test.
+   Grafana Cloud's own datasource, so check its status page before suspecting this repo.
+
+**`logs-dropped`** — Loki is refusing log pushes right now. The lines are gone, not delayed, and
+every log-based alert (`booking.yml`: `booking-error-rate`, the Stripe-webhook rule, the cron
+heartbeats) reads a stream with holes or nothing in it. Metric-based alerts are unaffected. Fires on
+`grafanacloud_logs_instance_discarded_bytes_per_second{reason="rate_limited"}` at any value over
+the last 15 minutes, so it resolves about 15 minutes after the last drop. `greater_than_max_sample_age`
+is not counted: a first deploy replays old logs and Loki refuses the oldest, once, with no loss.
+No Data is `OK` — the series exists only while something is refused, so absence is health
+(`logs-quota-budget` covers the datasource vanishing).
+1. **Is the allowance spent?** `grafanacloud_org_logs_usage` ≥ `grafanacloud_org_logs_included_usage`
+   (Explore → `grafanacloud-usage`). Then Loki's limit for the tenant is **0 bytes/sec** until the
+   1st, UTC: nothing ships and nothing can be done from here but stop the stream that filled it, so
+   the next month is not lost the same way. This is what happened on 2026-10-09.
+2. Usage under the allowance: a burst over the per-second limit. `docker logs --tail 20 alloy` on
+   each host shows the `429` and the limit it quotes; `grafanacloud_logs_instance_bytes_received_per_second`
+   shows who sent a spike. A deploy replay on a new container is the usual one-off.
+3. While it fires, treat every "no log line" alert as unproven rather than as a finding.
 
 **`textfile-canary-stale`** — only expected during the seam test. Delete `canary.prom`.
 

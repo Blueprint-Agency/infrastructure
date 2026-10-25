@@ -1,0 +1,134 @@
+# Alerts on whether Grafana Cloud will TAKE the logs we ship (infrastructure#40). Applied by
+# scripts/grafana-apply.py; this file is the copy of record, not the web UI.
+#
+# ── Why this file exists ─────────────────────────────────────────────────────────────────────
+# On 2026-10-09 the free tier's 50 GB/month of logs ran out, and Loki then answered every push
+# from both hosts `429 ... ingestion rate limit exceeded (limit: 0 bytes/sec)` until the counter
+# reset on the 1st (UTC). Nothing alerted: every log-based rule (grafana/rules/booking.yml, the
+# cron heartbeats among them) read a stream that had stopped arriving, and a rule that reads
+# nothing reads as healthy. Metrics kept flowing the whole time. docs/monitoring.md, "Budget".
+#
+# ── What these read, and why it is safe to ──────────────────────────────────────────────────
+# `grafanacloud-usage`, Grafana Cloud's own metering datasource -- the same one series-budget
+# (hosts.yml) uses. It is written by Grafana about the account, not by Alloy about the hosts, so
+# it does not go quiet when an agent is refused (a 401 from a revoked token, a 429 from this
+# quota) and it does not depend on Loki: both rules below are metric queries. That is the
+# property #40 asks of any rule that watches ingestion -- it must not depend on the pipeline it
+# is watching.
+#
+#   grafanacloud_org_logs_usage                      GB ingested so far this billing month
+#   grafanacloud_org_logs_included_usage             GB the plan includes (50 on the free tier)
+#   grafanacloud_logs_instance_discarded_bytes_per_second{reason="rate_limited"}
+#                                                    bytes/s Loki refused, by reason
+#
+# ── No data ──────────────────────────────────────────────────────────────────────────────────
+# The two rules answer No Data differently, on purpose.
+#
+# logs-quota-budget: `Alerting`. The usage gauge is always present -- it, and the included
+# figure beside it, answered every query made on the day of writing -- so an empty result means
+# the usage datasource or the metric is gone, and then NOTHING can warn about the quota. That is
+# the blind spot this file exists to close, so it speaks. `for: 15m` rides out one slow evaluation.
+#
+# logs-dropped: `OK`. The discarded series is SPARSE: it did not exist before 2026-10-09 and
+# exists only while Loki is refusing something (queried over 35 days: no `rate_limited` samples
+# at all before the cut-off). Absence is the healthy state, so No Data must not alert. The
+# datasource itself vanishing is logs-quota-budget's job -- same datasource, and it alerts.
+#
+# No `app` label on either: logs are shared by every app, so these land in the infra channel
+# (grafana/alerting/notifications.yml, docs/monitoring.md "Where an alert lands").
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: ingestion
+    folder: Monitoring
+    interval: 1m
+    rules:
+      # 80% of the plan's own figure, read from the account rather than hardcoded -- the
+      # opposite choice to series-budget's 8000, because here the ceiling is exported, so a plan
+      # change moves the threshold with it. The usage resets on the 1st, UTC, and this resolves
+      # then. 80% is a warning: at the rate that spent the month in nine days (6 GB/day) the
+      # remaining 10 GB is under two days; at the ~2 MB/day of ordinary logs it is never reached.
+      - uid: logs-quota-budget
+        title: Logs over 80% of the monthly allowance
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 900, to: 0}
+            datasourceUid: grafanacloud-usage
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: 100 * max(grafanacloud_org_logs_usage) / max(grafanacloud_org_logs_included_usage)
+          - refId: C
+            relativeTimeRange: {from: 900, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [80]}
+        noDataState: Alerting
+        execErrState: Error
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Grafana Cloud logs allowance this month"
+          # `with` because a No Data instance has no A to print.
+          value: "{{ with $values.A }}{{ humanize $values.A.Value }}% of the month's included logs used{{ else }}the usage figure cannot be read{{ end }}"
+          description: >-
+            At 100% Loki refuses every push from both hosts until the 1st (UTC), and every
+            log-based alert goes blind. Find what grew: Explore -> grafanacloud-logs,
+            `sum by (host, container) (bytes_over_time({host=~".+"}[1d]))` on a day before it
+            filled; then `grafanacloud-usage` ->
+            `grafanacloud_logs_instance_bytes_received_per_second`. A new or noisier stream is
+            the usual cause (the 2026-10-09 one was query_samples, 6 GB/day). If the figure cannot
+            be read, check grafanacloud-usage in Connections -> Data sources. Runbook:
+            docs/monitoring.md.
+
+      # The consequence, not the forecast: this fires when bytes are ACTUALLY being thrown away.
+      # `reason="rate_limited"` is the 429 -- the zero-byte limit after the allowance is spent,
+      # but also a plain burst over the per-second limit while usage is still under 100%, which
+      # is why this does not simply repeat logs-quota-budget. max_over_time over 15 minutes
+      # rather than the last sample, so a gap between the series' samples cannot let a firing
+      # alert flap closed; the cost is that it resolves ~15 minutes after the last drop.
+      # `greater_than_max_sample_age` is deliberately not counted: a first deploy replays old
+      # logs and Loki refuses the oldest (docs/monitoring.md, "Budget") -- once, and no loss.
+      - uid: logs-dropped
+        title: Loki is refusing log pushes
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 1200, to: 0}
+            datasourceUid: grafanacloud-usage
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: sum(max_over_time(grafanacloud_logs_instance_discarded_bytes_per_second{reason="rate_limited"}[15m]))
+          - refId: C
+            relativeTimeRange: {from: 1200, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Grafana Cloud logs ingestion"
+          value: "refused up to {{ humanize $values.A.Value }} bytes/s of logs in the last 15 minutes"
+          description: >-
+            Logs are being dropped right now, so log-based alerts (booking.yml) are blind and the
+            lines are gone for good. Usage at or over 100% -> the allowance is spent and nothing
+            ships until the 1st (UTC); stop the stream that filled it. Usage under 100% -> a
+            burst over the per-second limit: look at `grafanacloud_logs_instance_bytes_received_per_second`.
+            Agents logging `429` is the same fact from the host side:
+            `ssh bp-<host> 'docker logs --tail 20 alloy'`. Runbook: docs/monitoring.md.
