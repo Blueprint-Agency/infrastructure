@@ -19,8 +19,8 @@ groups:
     folder: Monitoring
     interval: 1m
     rules:
-      # bpvps1: the mail platform (stalwart, bulwark, unbound -- all three are required), Kaiteki,
-      # and blog-redirect, which 301s the retired blog.kaiteki.my (WordPress was stopped in
+      # bpvps1: the mail platform (stalwart, bulwark, unbound -- all three are required) and
+      # blog-redirect (the Kaiteki site itself moved to Vercel on 2026-10-31), which 301s the retired blog.kaiteki.my (WordPress was stopped in
       # 2026-10; wordpress/wp-db are deliberately not here). stalwart/traefik are root-owned
       # stacks CI does not deploy, but their containers report through the Docker socket like
       # any other (verified 2026-09-14).
@@ -44,8 +44,6 @@ groups:
                 or absent_over_time(container_last_seen{host="bpvps1", container="stalwart"}[3m])
                 or absent_over_time(container_last_seen{host="bpvps1", container="bulwark"}[3m])
                 or absent_over_time(container_last_seen{host="bpvps1", container="unbound"}[3m])
-                or absent_over_time(container_last_seen{host="bpvps1", container="kaiteki"}[3m])
-                or absent_over_time(container_last_seen{host="bpvps1", container="kaiteki-staging"}[3m])
                 or absent_over_time(container_last_seen{host="bpvps1", container="blog-redirect"}[3m])
                 or absent_over_time(container_last_seen{host="bpvps1", container="backup"}[3m])
           - refId: C

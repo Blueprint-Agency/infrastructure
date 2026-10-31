@@ -76,7 +76,7 @@ compose` is still SSH.
 | `bp-vps1-staging` | Staging | 2 vCPU / 8GB / 100GB |
 | `bp-vps2-prod` | Production | 4 vCPU / 16GB / 200GB |
 | `bp-vps3-prod` | Production | 4 vCPU / 16GB / 200GB |
-| `bp-bpvps1` | Kaiteki (`kaiteki.my`, `staging.`) + `blog-redirect` (301s the retired `blog.kaiteki.my`) + **the mail platform** (all three domains) | 187.127.122.41 |
+| `bp-bpvps1` | `blog-redirect` (301s the retired `blog.kaiteki.my`) + **the mail platform** (all three domains). The Kaiteki site moved to **Vercel** on 2026-10-31 — no `kaiteki` stacks here any more | 187.127.122.41 |
 | `bp-bpvps2` | Booking-system + its `backup` and `monitoring` stacks (the mail-port prober for bpvps1) — no mail since 2026-09-12 (#12) | 187.127.207.82 |
 
 SSH key: `~/.ssh/infra_ed25519`. All hosts log in as **`deploy`**, not root — `deploy` is in the `docker` group and owns `/root/stacks`. Hosts defined in `~/.ssh/config`.
@@ -238,8 +238,8 @@ result. The `provision` skill has the path-by-path contract. **Never add a branc
 > `CF_DNS_API_TOKEN`, `TRAEFIK_DASHBOARD_AUTH`, `ENV_NAME`, plus whatever the stack's own `ci/env.ci`
 > contributes) win; every other line, comments included, is preserved. This is what lets stacks keep
 > host-managed values such as booking's `BOOKING_HOST`/`IMAGE_TAG`. App repo deploys are compatible
-> with this: `booking-system` rewrites its own keys idempotently, and `ehailing` / `kaiteki-web`
-> write only their own `.env.*` files, which CI's rsync excludes.
+> with this: `booking-system` rewrites its own keys idempotently, and `ehailing`
+> writes only its own `.env.*` files, which CI's rsync excludes.
 
 > `GA4_MCP_PATH_TOKEN` left the host-wide key list on 2026-08-09 and moved to
 > `ga4-mcp/ci/env.ci`, where it belongs — only ga4-mcp's compose reads it, but it was previously
@@ -264,7 +264,7 @@ org variable exists for a **different repo's** deploy workflow. The org holds ex
 |---|---|
 | `VPS1_TAILSCALE_HOST`, `VPS2_TAILSCALE_HOST` | `teeko-website` → `be-deploy.yml`, `fe-deploy.yml` |
 | `VPS3_TAILSCALE_HOST` | `teeko-ehailing` → `deploy-backend.yml` |
-| `BPVPS1_TAILSCALE_HOST` | `kaiteki-web` → `deploy-prod.yml`, `deploy-staging.yml` |
+| `BPVPS1_TAILSCALE_HOST` | **nothing** since 2026-10-31 — `kaiteki-web` moved to Vercel and its deploy workflows were deleted. Verify the other repos, then delete |
 | `BPVPS2_TAILSCALE_HOST` | `booking-system` → `deploy-be.yml` |
 | `ACME_EMAIL`, `BASE_DOMAIN`, `DOCKERHUB_USERNAME` | infra + every app build |
 

@@ -81,28 +81,6 @@ apps:
       Migrated off vps3-prod on 2026-07-21; staging carries the original data, prod
       started empty."
 
-  - name: kaiteki-web
-    image: blueprintagency/kaiteki-web
-    tags:
-      staging: staging
-      production: prod
-    stack: kaiteki-staging      # staging; production runs in the `kaiteki` stack
-    vps:
-      staging: bpvps1          # 4th VPS (187.127.122.41), alongside the production kaiteki stack
-      production: bpvps1
-    port: 3000
-    domain:
-      staging: staging.kaiteki.my
-      production: kaiteki.my   # + www.kaiteki.my
-    db: null
-    notes: "Revamped Kaiteki site (Next.js 16, standalone). Built from Blueprint-Agency/kaiteki-web
-      (app-managed stacks): staging branch → deploy-staging.yml → :staging → kaiteki-staging stack;
-      main branch → deploy-prod.yml → :prod → kaiteki stack. Both on a separate Cloudflare account
-      (proxied, Full) → Traefik default cert, no LE DNS-01.
-      Cut over 2026-08-01 from the legacy blueprintagency/kaiteki-main-old; that repo
-      (Blueprint-Agency/kaiteki-main-old) had its deploy.yml deleted and no longer publishes.
-      Rollback: /root/stacks/kaiteki/docker-compose.yml.legacy-bak on bpvps1 pins the old image."
-
 n8n_instances:
   - name: n8n-dev
     image: n8nio/n8n:latest
@@ -231,6 +209,8 @@ mail:
       encrypts every user's saved settings."
 
 # Already removed (migration complete):
+# - kaiteki-web, `kaiteki` + `kaiteki-staging` stacks on bpvps1 (2026-10-31 — kaiteki.my moved to
+#   Vercel; the repo's deploy-prod.yml / deploy-staging.yml were deleted with it)
 # - stalwart / unbound / bulwark on bpvps2 (2026-09-12, #12 — mail consolidated onto bpvps1)
 # - pgadmin (replaced by drizzle-gateway on all 3 Teeko VPS)
 # - portainer / portainer_agent (replaced by Claude Code + MCP)

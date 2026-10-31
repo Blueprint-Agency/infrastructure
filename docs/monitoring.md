@@ -418,7 +418,7 @@ writing anything, `POST <GRAFANA_SM_URL>/api/v1/check/validate` with a check bod
 
 | Names | Certificate from |
 |---|---|
-| `kaiteki.my`, `www.`, `staging.`, `blog.kaiteki.my` | Cloudflare's edge (proxied) — the probe sees Cloudflare's cert, renewed by Cloudflare |
+| `blog.kaiteki.my` | Cloudflare's edge (proxied) — the probe sees Cloudflare's cert, renewed by Cloudflare. (`kaiteki.my` itself moved to Vercel on 2026-10-31 and is not probed) |
 | `mail.`/`webmail.` `kaiteki.my` and `blueprintdigital.my` | `vps/bpvps1/stacks/stalwart/renew-cert.sh` (acme.sh, DNS-01) |
 | `webmail.reservetoday.app` | bpvps1 Traefik, `le-tls` (TLS-ALPN-01) — the record must stay DNS-only on Vercel |
 | `api.reservetoday.app`, `api.dev.reservetoday.app` | bpvps2 Traefik, `le-tls` (TLS-ALPN-01) — [`tls-wildcard-constraint.md`](tls-wildcard-constraint.md) |
