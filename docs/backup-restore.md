@@ -36,7 +36,7 @@ check never reads as "everything is backed up". The only tool for those hosts is
 | bpvps1 | `mail-store` (all mail, all three domains — **stops Stalwart for a few seconds nightly**, see [The mail store](#the-mail-store), #29), `bulwark-settings`, `bulwark-admin`, `bulwark-admin-state`, `traefik-certs` (#28) |
 
 > **`wordpress` left bpvps1's targets in 2026-10** when the Kaiteki blog was retired
-> (`vps/bpvps1/stacks/blog-redirect/README.md`). Its snapshots stay in the repository: `forget`
+> (`docs/kaiteki-blog-retirement.md`). Its snapshots stay in the repository: `forget`
 > runs per target only when the target is backed up, so the last ones are never pruned. The
 > mysql restore below still works against them. The WordPress `wp-content` directory was never
 > backed up here (a bind mount, not a volume); it is still on the host, stopped, and inside the

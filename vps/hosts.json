@@ -14,7 +14,7 @@
     "exclude": "",  "app_stacks": "ehailing" },
 
   { "key": "bpvps1", "dir": "vps/bpvps1", "env_name": "prod",
-    "_comment": "stalwart/traefik/wordpress are root:root on the host; CI connects as deploy and cannot write them. Excluded until they are chowned to deploy. wordpress was retired in 2026-10 and its compose left this repo (stacks/blog-redirect/README.md); it stays in exclude so CI never reads the deletion as a stack to `compose down` -- the stopped stack, its volume and wp-content are kept on the host. backup is NOT excluded: it is its own deploy-owned dir that reaches their data through the Docker socket (#28), and its post-sync.sh refuses a dir that is not.",
+    "_comment": "stalwart/traefik/wordpress are root:root on the host; CI connects as deploy and cannot write them. Excluded until they are chowned to deploy. wordpress was retired in 2026-10 and its compose left this repo (docs/kaiteki-blog-retirement.md); it stays in exclude so CI never reads the deletion as a stack to `compose down` -- the stopped stack, its volume and wp-content are kept on the host. backup is NOT excluded: it is its own deploy-owned dir that reaches their data through the Docker socket (#28), and its post-sync.sh refuses a dir that is not.",
     "exclude": "stalwart traefik wordpress", "app_stacks": "" },
 
   { "key": "bpvps2", "dir": "vps/bpvps2", "env_name": "prod",

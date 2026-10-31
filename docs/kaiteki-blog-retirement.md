@@ -1,7 +1,14 @@
-# blog-redirect (bpvps1)
+# Kaiteki blog retirement
+
+> **Moved to Vercel on 2026-10-31.** This was the README of the `blog-redirect` stack on
+> bpvps1, an nginx that 301'd `blog.kaiteki.my`. That stack is deleted. The same map now
+> runs in kaiteki-web: `proxy.ts` reads `config/blog-host-redirects.json` (converted from
+> `blog-redirects.conf`, all 902 cases checked live). Edit that JSON by hand: the generator
+> below needs WordPress and can no longer run. `blog.kaiteki.my` is a DNS-only CNAME to
+> Vercel. The cutover and rollback below are history. **"What was kept" is still true.**
 
 `blog.kaiteki.my` after the blog moved to `kaiteki.my/blog`. One nginx container that
-301s every legacy URL to its new home. No data and no secrets, so nothing to back up.
+301'd every legacy URL to its new home.
 
 ## What it maps
 

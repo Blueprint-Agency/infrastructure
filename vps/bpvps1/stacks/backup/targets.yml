@@ -11,7 +11,7 @@
 targets:
   # The Kaiteki WordPress blog (`wordpress`, mysql from wp-db) was a target here until it
   # was retired in 2026-10: its posts moved to kaiteki.my/blog and the stack was stopped
-  # (stacks/blog-redirect/README.md). Its restic snapshots are kept: `restic forget` runs
+  # (docs/kaiteki-blog-retirement.md). Its restic snapshots are kept: `restic forget` runs
   # per target only when that target is backed up, so the last ones stay in R2. The
   # stopped wordpress_wp-db-data volume is still on the host.
 
