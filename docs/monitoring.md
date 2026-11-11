@@ -120,10 +120,15 @@ Measured after the fix, 2026-11-11, per day for both instances together:
 | Stream | Before | After |
 |---|---|---|
 | `op="query_association"` (query text) | 4.13 GB | ~31 MB |
-| `op="create_statement"` + `op="table_detection"` (schema) | ~39 MB | _not settled on the day: `create_statement` arrives in bursts of ~200 KB per instance that do not follow the interval. Between ~4 and ~39 MB — re-read after a full day_ |
+| `op="table_detection"` (schema, every 10 min) | ~20 MB | ~2 MB |
+| `op="create_statement"` (schema) | ~20 MB | ~20 MB — it arrives as one ~200 KB burst per instance about every half hour, on the collector's own cache cycle, and does **not** follow `collect_interval` |
 | `op="query_parsed_table_name"` | ~11 MB | ~11 MB |
 | Container logs, bpvps1 / bpvps2 | 1.7 MB / 0.6 MB | unchanged |
-| **Everything** | **~4.2 GB/day** | **0.05–0.08 GB/day ≈ 1.5–2.5 GB/month, under 5% of the allowance** (the first 20 minutes after deploy extrapolate to 0.08) |
+| **Everything** | **~4.2 GB/day** | **~0.07 GB/day ≈ 2 GB/month, 4% of the allowance** |
+
+These are a clean 30-minute window after the deploy, times 48, plus the half-hourly burst — not
+a full day. **Re-read after 24 hours** with
+`sum by (op) (bytes_over_time({service_name="integrations/db-o11y"}[1d]))` and correct the table.
 
 Agent cost of the trim, measured on bpvps2 with it live: `db-observability` 0.5% CPU, 62 MiB.
 Known cost of the slower collectors: a Grafana time range under 5 minutes may show a query
@@ -275,7 +280,7 @@ schema details — for **both booking Postgres instances**, from its own stack o
 | Collectors | `query_details`, `schema_details`, and the exporter's `stat_statements`, `database`, `stat_database`. **`query_details` runs every 5 minutes and its query text is cut to 1000 characters** (#54): at the defaults it shipped ~4–6 GB of Loki lines a day — ten bulk `INSERT`s of ~150 KB each, re-sent every minute — and spent the free tier's month of logs in nine days (see "Budget"). **`query_samples` is off since 2026-10-09**: it was blamed for that stream, wrongly, and stays off because its own volume has never been measured — the "query samples" view is the casualty. **`explain_plans` is off**: `EXPLAIN` needs `SELECT` on every table it plans. Grafana's alternative grant `pg_read_all_data` does **not** set `BYPASSRLS`, and booking-system's migration `0033` `FORCE`s row-level security on every `tenant_id` table — so it would read those back *empty*. What it would expose is what `0033` leaves outside RLS: the `tenants` / `tenant_settings` rows (each Tenant's identity, premises and branding copy) and any table with no `tenant_id`. That is the reason to refuse it |
 | Object grants skipped | Grafana's setup page also asks for `GRANT SELECT ON ALL TABLES` (or `pg_read_all_data`) "for detailed data". Skipped, and the schema tab still fills — but **only because Alloy v1.19.2's `schema_details` reads `pg_catalog`, never `information_schema`**. This is version-coupled: re-read that collector before the stack's `Dockerfile` tag moves |
 | Labels | `job="integrations/db-o11y"` (what Database Observability looks for), `instance` = `booking-staging` / `booking-prod`, `host` |
-| Budget | **Three budgets, not one.** Series: a keep-list in its `config.alloy` (`prometheus.relabel "keep"`); ~290 per instance measured against a local Postgres, `stat_statements { limit = 100 }` bounds it near 540 each, **~1,100 for both**. Logs: `query_details` and `schema_details` write Loki lines, 50–80 MB a day after the trim (see "Budget" — untrimmed it was 4–6 GB a day). **Host-hours**: the product itself is metered at 2,232 a month included, which is **three instances**; two use 48 a day, ~64%. `dbo11y-hours-pace` alerts if a month is on pace to pass it |
+| Budget | **Three budgets, not one.** Series: a keep-list in its `config.alloy` (`prometheus.relabel "keep"`); ~290 per instance measured against a local Postgres, `stat_statements { limit = 100 }` bounds it near 540 each, **~1,100 for both**. Logs: `query_details` and `schema_details` write Loki lines, ~65 MB a day after the trim (see "Budget" — untrimmed it was 4–6 GB a day). **Host-hours**: the product itself is metered at 2,232 a month included, which is **three instances**; two use 48 a day, ~64%. `dbo11y-hours-pace` alerts if a month is on pace to pass it |
 | Not collected | Postgres's own server log (the `logs` collector wants `log_line_prefix` changed and a file to tail; its container log already reaches Loki through `alloy`) |
 
 ### Turning it on — once, in this order
@@ -825,8 +830,11 @@ says which (`docker` → `container-restarting`, `postgres` → `postgres-connec
 > **`probe=tailscale` after a Tailscale update was a false alarm for nine days** (2026-11-02 to
 > 11-11, both hosts). The container mounted `/run/tailscale`, which systemd deletes and recreates
 > when `tailscaled` restarts, so it kept looking at the deleted directory. It now mounts the
-> host's `/run` at `/host-run` instead (#54). If "tailscaled LocalAPI did not answer" ever
-> returns: `docker exec probes ls -l /host-run/tailscale/`.
+> host's `/run` at `/host-run` instead (#54). **Proven on bpvps1, 2026-11-11:** `systemctl
+> restart tailscaled` recreated `/run/tailscale` (new timestamp 08:30:30 UTC), and the `probes`
+> container — not restarted, up nine minutes — saw the new socket and `probe.sh tailscale`
+> exited 0. If "tailscaled LocalAPI did not answer" ever returns:
+> `docker exec probes ls -l /host-run/tailscale/`.
 
 **`textfile-unreadable`** — a `*.prom` file is malformed, so that producer's metrics stopped.
 1. `ssh bp-<host> 'docker logs --tail 50 alloy'` names the file.
