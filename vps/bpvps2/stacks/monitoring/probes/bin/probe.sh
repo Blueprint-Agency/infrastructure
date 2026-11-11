@@ -129,7 +129,8 @@ case "$job" in
     ;;
 
   tailscale)
-    status=$(curl -sf --max-time 10 --unix-socket /var/run/tailscale/tailscaled.sock \
+    # /host-run is the host's /run (docker-compose.yml says why it is not /run/tailscale).
+    status=$(curl -sf --max-time 10 --unix-socket "${TAILSCALED_SOCKET:-/host-run/tailscale/tailscaled.sock}" \
       http://local-tailscaled.sock/localapi/v0/status) || fail "tailscaled LocalAPI did not answer"
     body=$(prom_tailscale "$status") || fail "LocalAPI status has no Self"
     # Weekly, so a week and a day: one missed run is not yet an alert, two are.

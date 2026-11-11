@@ -33,6 +33,7 @@ on:
       - 'scripts/grafana-apply.py'
       - 'scripts/test_grafana_apply.py'
       - 'scripts/test_probes_lib.sh'
+      - 'scripts/test_log_pipeline.sh'
 
 jobs:
   # ── Monitoring agrees with itself — runs on every push, host selected or not ─
@@ -53,6 +54,7 @@ jobs:
           python3 vps/shared/test_public_endpoints.py
           python3 scripts/test_grafana_apply.py
           bash vps/shared/validate-alloy.sh
+          bash scripts/test_log_pipeline.sh
 
   # ── Map changed paths → host entries from vps/hosts.json ─────────────────────
   detect:

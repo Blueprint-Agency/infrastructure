@@ -100,6 +100,13 @@ declare "booking_postgres" {
     query_details {
       collect_interval = "5m"
     }
+
+    // The schema changes on a deploy, not every minute. At the 1m default this was the
+    // largest stream left after the trim (~39 MB/day for the two instances, measured
+    // 2026-11-11). Cost: a Grafana time range under 10 minutes may show no schema.
+    schema_details {
+      collect_interval = "10m"
+    }
   }
 
   // The byte budget for this stack's log lines. Order matters.
@@ -121,6 +128,17 @@ declare "booking_postgres" {
     stage.drop {
       longer_than         = "8KB"
       drop_counter_reason = "oversize"
+    }
+
+    // And a ceiling on how many. One instance sends ~310 lines per query_details cycle and
+    // ~100 per schema cycle (measured 2026-11-11), about 1.2 a second on average, so the
+    // burst holds three whole cycles and the rate is over twice the average. Past that,
+    // lines are dropped: a collector that starts sending ten times as much is a bug, and
+    // the allowance is shared with every real log on both hosts.
+    stage.limit {
+      rate  = 3
+      burst = 1000
+      drop  = true
     }
   }
 

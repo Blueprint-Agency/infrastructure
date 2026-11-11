@@ -11,6 +11,15 @@
 # traefik, wordpress included) with no error. ci/post-sync.sh refuses a dir not owned by deploy.
 #
 # Runbook (alerts, budget, silencing, adding a host): docs/monitoring.md.
+
+# The same cap as bpvps2's services (10m x 3): an agent logging a 429 per push must not be
+# what fills the mail host's disk (#54).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   alloy:
     build: .
@@ -19,6 +28,7 @@ services:
     # Not keyed on ${ENV_NAME}: one agent per HOST, covering every instance on it.
     container_name: alloy
     restart: unless-stopped
+    logging: *logging
     # The host's network namespace: /proc/net is per namespace, so in a bridge network the
     # node_network_* series would describe the container's own veth.
     network_mode: host
@@ -49,7 +59,8 @@ services:
       - /sys:/sys:ro
       - /:/rootfs:ro,rslave
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /run/containerd/containerd.sock:/run/containerd/containerd.sock:ro
+      # The directory, not the socket file: a restarted containerd makes a new socket inode.
+      - /run/containerd:/run/containerd:ro
       - /var/lib/docker:/var/lib/docker:ro
       - /dev/disk:/dev/disk:ro
       # Log read positions and the metrics WAL: a restart resumes rather than re-ships.
@@ -70,6 +81,7 @@ services:
     pull_policy: build
     container_name: probes
     restart: unless-stopped
+    logging: *logging
     # tini as PID 1. crond does not reap orphans: every `timeout` a probe left behind stayed a
     # zombie, and on 2026-09-15 bpvps2's 4,103 of them filled the 64m limit with kernel memory
     # until every probe timed out and the mail heartbeat stopped.
@@ -79,8 +91,10 @@ services:
       TZ: Asia/Kuala_Lumpur
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      # The directory, not the socket file: a tailscaled restart makes a new socket inode.
-      - /var/run/tailscale:/var/run/tailscale:ro
+      # The host's /run, not /run/tailscale: systemd deletes and recreates that directory when
+      # tailscaled restarts, and a mount of it keeps showing the deleted one (#54, and the
+      # longer note in bpvps2's copy of this file). Not at the container's own /run.
+      - /run:/host-run:ro
       - textfile:/textfile
     cpus: 0.1
     mem_limit: 64m

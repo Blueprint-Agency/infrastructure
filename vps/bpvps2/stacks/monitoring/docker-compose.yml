@@ -9,6 +9,15 @@
 # Outbound only. No host port, no Traefik, no network of its own. Everything it reads is
 # mounted read-only; it runs as root inside the container to read /proc, /sys, the cgroup
 # tree and the Docker socket, which is what `deploy`'s docker group already grants.
+
+# The cap every booking service carries (10m x 3). Without it an agent that logs a 429 per push
+# for three weeks -- October 2026 -- grows its json-file until the disk alert (#54).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   alloy:
     build: .
@@ -17,6 +26,7 @@ services:
     # Not keyed on ${ENV_NAME}: one agent per HOST, covering every instance on it.
     container_name: alloy
     restart: unless-stopped
+    logging: *logging
     # The HOST's network namespace, for two reasons. /proc/net is per network namespace, so
     # in a bridge network node_network_* reports the container's own veth -- a flat line of a
     # few KB (measured 2026-09-13).
@@ -55,7 +65,9 @@ services:
       # Docker 29 stores images in containerd's snapshotter, and cadvisor asks containerd
       # about every container. Without this it logs "cannot unix dial containerd" per
       # container, every minute (seen on bpvps2, 2026-09-13).
-      - /run/containerd/containerd.sock:/run/containerd/containerd.sock:ro
+      # The DIRECTORY, not the socket file: a file bind mount pins one inode, and a restarted
+      # containerd makes a new one -- the same trap that blinded the Tailscale probe (#54).
+      - /run/containerd:/run/containerd:ro
       - /var/lib/docker:/var/lib/docker:ro
       - /dev/disk:/dev/disk:ro
       # Log read positions and the metrics WAL: a restart resumes rather than re-ships.
@@ -79,6 +91,7 @@ services:
     pull_policy: build
     container_name: probes
     restart: unless-stopped
+    logging: *logging
     # tini as PID 1. crond does not reap orphans: every `timeout` a probe left behind stayed a
     # zombie, and on 2026-09-15 4,103 of them filled the 64m limit with kernel memory until every
     # probe timed out and the mail heartbeat stopped.
@@ -96,8 +109,13 @@ services:
     volumes:
       # docker ps / inspect / exec: restart counts, and psql inside each Postgres container.
       - /var/run/docker.sock:/var/run/docker.sock
-      # The directory, not the socket file: a tailscaled restart makes a new socket inode.
-      - /var/run/tailscale:/var/run/tailscale:ro
+      # tailscaled's socket, through the host's /run -- NOT /run/tailscale itself. systemd
+      # owns that directory (RuntimeDirectory=tailscale) and deletes and recreates it whenever
+      # the unit restarts, so a mount of it keeps showing the deleted one: the 2026-11-02
+      # auto-update left this probe failing for nine days (#54). /run is a tmpfs that lives
+      # as long as the host is up, so a recreated child stays visible. Not at the container's
+      # own /run, which holds job.env. Read-only, and no wider than the Docker socket above.
+      - /run:/host-run:ro
       - textfile:/textfile
     cpus: 0.1
     mem_limit: 64m

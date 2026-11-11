@@ -3,6 +3,12 @@ services:
     image: traefik:v3.3
     container_name: traefik
     restart: unless-stopped
+    # The cap every booking service carries (#54): a failing renewal logs every day, forever.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     command:
       - "--api.dashboard=true"
       - "--providers.docker=true"

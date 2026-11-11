@@ -221,6 +221,28 @@ loki.process "select" {
       values = {level = ""}
     }
   }
+
+  // The byte budget, last so it counts only what would really ship (#54). All logs on both
+  // hosts share one 50 GB month, and one container in an error loop could spend it for
+  // everyone -- as one stream did twice in 2026. Ordinary volume is ~2 MB a day for the
+  // whole account, so neither limit is near anything real:
+  //   - a line over 8 KB is dropped (Docker already splits lines at 16 KB);
+  //   - each container may send 2 lines a second, with 600 saved up for a burst (a boot, a
+  //     stack trace). Over that, lines are dropped, not queued.
+  // Worst case per container is then ~1.4 GB a day instead of unbounded, which the logs-pace
+  // alert (grafana/rules/ingestion.yml) reports within hours.
+  stage.drop {
+    longer_than         = "8KB"
+    drop_counter_reason = "oversize"
+  }
+
+  stage.limit {
+    rate                = 2
+    burst               = 600
+    by_label_name       = "container"
+    max_distinct_labels = 100
+    drop                = true
+  }
 }
 
 loki.write "grafana_cloud" {
