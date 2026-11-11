@@ -44,17 +44,19 @@
 # scripts/test_grafana_apply.py fails the build when a cadence in use has no rule here, when a
 # rule matches a cadence nothing uses, or when a window is not 2 x its interval + 1m.
 #
-# ⚠️ ONE PROBE, not three, everywhere (#42). "Fires only when EVERY probe fails, so one probe's
-# own network trouble is not a page" was the premise this file was written on and it is no
-# longer true: with a single probe, one flaky hop out of Singapore is indistinguishable from a
-# real outage. What survives of the mitigation is the window -- two consecutive failures from
-# that probe, never one. That is the detection this budget buys; the honest reading of every
-# `endpoint-down` below is "Singapore has failed this name twice in a row".
+# ⚠️ ONE PROBE, not three, everywhere (#42). With a single probe, one flaky hop out of Singapore
+# is indistinguishable from a real outage. What survives of the mitigation is the window -- two
+# consecutive failures from that probe, never one. The honest reading of every `endpoint-down`
+# below is "Singapore has failed this name twice in a row", and the message says exactly that.
 #
-# ⚠️ AFTER A CADENCE CHANGE, the first apply can page. A rule matches `cadence="15m"`, and no
-# series carries that label until each check has run once under the new config -- up to fifteen
-# minutes, during which these rules see no data and `noDataState: NoData` does what it says.
-# Run scripts/grafana-apply.py in daylight and expect one NoData round. docs/monitoring.md.
+# ── A DATA GAP IS NOT AN OUTAGE (#54) ────────────────────────────────────────────────────────
+# Both endpoint-down rules keep their last state when the query returns nothing
+# (`noDataState: KeepLast`). They used to say NoData, and from 2026-10-21 to 11-01, while Loki
+# was refusing logs and probe samples went missing with them, endpoint-down-2m flipped into
+# NoData 1,178 times -- each one a message that read as a site being down. A gap in the results
+# is the PROBE's problem, and one rule owns it: `probe-results-stale`, at the bottom of this
+# file, which fires once when results stop arriving at all. KeepLast also means a name that is
+# down stays down through a gap, instead of resolving on silence.
 apiVersion: 1
 groups:
   - orgId: 1
@@ -66,10 +68,10 @@ groups:
       # The ten-week VPS1 outage: every container healthy, every domain 404. Nothing on the
       # host can see this; a probe outside it can.
       #
-      # max_over_time over 5m, per probe, then max across probes: this is 1 if ANY probe
-      # succeeded even once in five minutes. At a 2m cadence that is two runs plus the push
-      # lag, so it drops below 1 only after two consecutive failures -- #22's "2 consecutive
-      # failures", read as every probe rather than any. No `for`: the window already is the wait.
+      # max_over_time over 5m: this is 1 if the probe succeeded even once in five minutes. At a
+      # 2m cadence that is two runs plus the push lag, so it drops below 1 only after two
+      # consecutive failures -- #22's "2 consecutive failures". No `for`: the window already
+      # is the wait.
       #
       # Traefik stopped at t0, worst case: the last success leaves the window by t0+5m, the next
       # evaluation by t0+6m, then the notification policy's group wait. #24 wanted a phone
@@ -114,25 +116,19 @@ groups:
                 - evaluator:
                     type: lt
                     params: [1]
-        # No probe data at all means Synthetic Monitoring itself stopped reporting -- say so,
-        # rather than read silence as health.
-        noDataState: NoData
+        # See "A data gap is not an outage" in the header. probe-results-stale owns silence.
+        noDataState: KeepLast
         execErrState: Error
         for: 0s
         labels:
           severity: critical
         annotations:
           summary: "{{ $labels.job }} on {{ $labels.host }}"
-          value: "failing from every probe"
+          value: "failed 2 checks in a row from Singapore"
+          action: "`ssh bp-{{ $labels.host }} 'docker ps; docker logs --tail 50 traefik'`. Host vercel: check vercel-status.com"
           description: >-
-            Every Grafana probe has failed at least two runs in a row against {{ $labels.instance }}.
-            This name is checked every 2 minutes (grafana/synthetic/endpoints.yml).
-            If every name on {{ $labels.host }} fires together, suspect Traefik or the host:
-            `ssh bp-{{ $labels.host }} 'docker ps; docker logs --tail 50 traefik'`. One name alone:
-            its container, its router rule, or its DNS record. If {{ $labels.host }} is not one of
-            bpvps1/bpvps2 it is an off-platform name (grafana/synthetic/endpoints.yml,
-            off_platform:) -- nothing here serves it and there is nothing to ssh; read that
-            provider's status page. Runbook: docs/monitoring.md.
+            {{ $labels.instance }} is checked every 2 minutes. Every name on the host at once
+            means Traefik or the host; one name alone means its container, router or DNS record.
 
       # ── cadence 15m: everything else ────────────────────────────────────────────────────
       # Same rule, same severity, a window of 31m because the checks run every 15 (2 x 15m + 1m
@@ -141,6 +137,10 @@ groups:
       # the page being down is still a page-worthy fact -- only the speed changed, not the
       # seriousness. If that turns out to hurt, paying for Synthetic Monitoring is the fix, and
       # it should be a decision rather than a default (grafana/synthetic/endpoints.yml).
+      #
+      # `for: 2m` (#54): the join reads three windows over series that each move once every
+      # fifteen minutes, and for one 60-second evaluation they can disagree -- which sent a
+      # firing/resolved pair with nothing wrong. Two minutes against a 31-minute detection is free.
       - uid: endpoint-down-15m
         title: Public endpoint failing (15m)
         condition: C
@@ -175,33 +175,35 @@ groups:
                 - evaluator:
                     type: lt
                     params: [1]
-        noDataState: NoData
+        noDataState: KeepLast
         execErrState: Error
-        for: 0s
+        for: 2m
         labels:
           severity: critical
         annotations:
           summary: "{{ $labels.job }} on {{ $labels.host }}"
-          value: "failing from every probe"
+          value: "failed 2 checks in a row from Singapore"
+          action: "`ssh bp-{{ $labels.host }} 'docker ps; docker logs --tail 50 traefik'`. Host vercel: check vercel-status.com"
           description: >-
-            Every Grafana probe has failed at least two runs in a row against {{ $labels.instance }}.
-            This name is checked every 15 minutes (grafana/synthetic/endpoints.yml), so it has
-            been down for at least half an hour.
-            If every name on {{ $labels.host }} fires together, suspect Traefik or the host:
-            `ssh bp-{{ $labels.host }} 'docker ps; docker logs --tail 50 traefik'`. One name alone:
-            its container, its router rule, or its DNS record. If {{ $labels.host }} is not one of
-            bpvps1/bpvps2 it is an off-platform name (grafana/synthetic/endpoints.yml,
-            off_platform:) -- nothing here serves it and there is nothing to ssh; read that
-            provider's status page. Runbook: docs/monitoring.md.
+            {{ $labels.instance }} is checked every 15 minutes, so it has been down for at least
+            half an hour. Every name on the host at once means Traefik or the host; one name alone
+            means its container, router or DNS record.
 
       # Renewal fails silently: a TLS-ALPN-01 record flipped to proxied, a token scoped to the
-      # wrong zone, acme.sh keyed on a renamed primary. Every renewal here runs at 30 days left,
-      # so 21 days means at least nine days of failed attempts.
+      # wrong zone, acme.sh keyed on a renamed primary, a stored certificate still carrying a
+      # retired name (api.staging, 2026-11). Every renewal here runs at 30 days left, so 21
+      # days means at least nine days of failed attempts.
       #
-      # ONE rule for every cadence, unlike endpoint-down: the threshold is 21 DAYS, so whether
+      # ONE query for every cadence, unlike endpoint-down: the threshold is in DAYS, so whether
       # the number is half an hour old changes nothing. It only has to survive staleness, hence
       # min_over_time / last_over_time over 31m -- the slowest cadence in use plus the push lag.
       # If a slower cadence is ever added, this window grows with it; the test checks that.
+      #
+      # TWO tiers on that one query (#54). The warning sat unread for a week in November 2026
+      # with eighteen days left on booking-staging's certificate, so under 7 days it is said
+      # again as a critical. `floor` makes the value whole days -- "expires in 18 days", not
+      # "18.22" -- and lets the two ranges meet without overlapping: 7 to 20 warns, 0 to 6 (and
+      # an expired certificate's negative days) is critical.
       - uid: tls-expiry
         title: TLS certificate expiring
         condition: C
@@ -216,7 +218,51 @@ groups:
               instant: true
               range: false
               expr: |
-                (min by (instance, job) (min_over_time(probe_ssl_earliest_cert_expiry[31m])) - time()) / 86400
+                floor((min by (instance, job) (min_over_time(probe_ssl_earliest_cert_expiry[31m])) - time()) / 86400)
+                * on (instance, job) group_left (host)
+                max by (instance, job, host) (topk by (instance, job) (1, label_replace(last_over_time(sm_check_info[31m]), "host", "$1", "label_host", "(.+)")))
+          - refId: C
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: within_range
+                    params: [6.5, 20.5]
+        # probe-results-stale covers "no probe data".
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS certificate for {{ $labels.job }} on {{ $labels.host }}"
+          value: '{{ printf "%.0f" $values.A.Value }} days left'
+          action: "`ssh bp-{{ $labels.host }} 'docker logs traefik 2>&1 | grep -i acme | tail'`. Mail names: stalwart/renew-cert.sh"
+          description: >-
+            Under 21 days left, so renewal has been failing for over a week. Which renewer owns
+            the name: docs/monitoring.md, "External checks".
+
+      - uid: tls-expiry-critical
+        title: TLS certificate expires within a week
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                floor((min by (instance, job) (min_over_time(probe_ssl_earliest_cert_expiry[31m])) - time()) / 86400)
                 * on (instance, job) group_left (host)
                 max by (instance, job, host) (topk by (instance, job) (1, label_replace(last_over_time(sm_check_info[31m]), "host", "$1", "label_host", "(.+)")))
           - refId: C
@@ -231,16 +277,68 @@ groups:
               conditions:
                 - evaluator:
                     type: lt
-                    params: [21]
-        # The endpoint rules already cover "no probe data".
+                    params: [7]
         noDataState: OK
         execErrState: Error
         for: 10m
         labels:
-          severity: warning
+          severity: critical
         annotations:
           summary: "TLS certificate for {{ $labels.job }} on {{ $labels.host }}"
-          value: "expires in {{ humanize $values.A.Value }} days"
+          value: '{{ printf "%.0f" $values.A.Value }} days left'
+          action: "`ssh bp-{{ $labels.host }} 'docker logs traefik 2>&1 | grep -i acme | tail'`. Mail names: stalwart/renew-cert.sh"
           description: >-
-            The certificate served for {{ $labels.job }} has under 21 days left, so renewal has been
-            failing for over a week. Which renewer owns the name: docs/monitoring.md, "External checks".
+            Under 7 days left. When it expires, browsers and API clients refuse the name. Which
+            renewer owns it: docs/monitoring.md, "External checks".
+
+      # ── Are probe results arriving at all? (#54) ────────────────────────────────────────
+      # The one rule that owns silence, so the endpoint rules above do not have to. Eleven
+      # checks, two of them every 2 minutes, write ~93 probe_success samples in any 15 minutes
+      # (measured 2026-11-11); zero for a quarter of an hour, held for another, means Synthetic
+      # Monitoring has stopped running or stopped publishing -- and every endpoint and TLS
+      # alert is blind, which is worth exactly one message.
+      #
+      # `sum(...) or vector(0)` makes "no series" a real 0 on a labelless instance, the same
+      # shape as metrics-stale-<host> (ingestion.yml) and for the same reason. No Data is
+      # `Alerting` on top: the query cannot return nothing, so No Data means the metrics
+      # datasource did not answer, and then nothing here can be trusted either.
+      # A warning, not a critical: no site is known to be down, the monitor is.
+      - uid: probe-results-stale
+        title: No probe results arriving
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: sum(count_over_time(probe_success[15m])) or vector(0)
+          - refId: C
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+        noDataState: Alerting
+        execErrState: Error
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Synthetic Monitoring probe results"
+          value: "{{ with $values.A }}none in the last 15 minutes{{ else }}the query returned nothing{{ end }}"
+          action: "Grafana -> Testing & synthetics -> Checks: are they running? Then status.grafana.com"
+          description: >-
+            No check has reported for half an hour, so every endpoint and certificate alert is
+            blind. This is the monitor, not a site being down.

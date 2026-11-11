@@ -54,8 +54,10 @@ groups:
       # requests a minute produces, and far below a crash-loop or a broken deploy. It must be
       # revisited from real data before it is trusted: docs/monitoring.md, "Tune or delete".
       #
-      # No `for`: the 5-minute window IS the wait, the same reading as endpoint-down. A single
-      # burst that crosses 20 and stops resolves on the next evaluation after it ages out.
+      # `for: 2m` (#54): a count sitting right at 20 crossed it and fell back on alternate
+      # evaluations, a firing/resolved pair each time. Two minutes over the line is still a
+      # spike. `fatal` counts too: Pino writes a crash at that level, and a rule that matched
+      # only `error` would have missed exactly the lines that matter most.
       - uid: booking-error-rate
         title: Booking backend error rate
         condition: C
@@ -67,7 +69,7 @@ groups:
               refId: A
               queryType: instant
               expr: |
-                sum by (host, container) (count_over_time({compose_service="booking-be", level="error"} [5m]))
+                sum by (host, container) (count_over_time({compose_service="booking-be", level=~"error|fatal"} [5m]))
           - refId: C
             relativeTimeRange: {from: 600, to: 0}
             datasourceUid: __expr__
@@ -81,18 +83,17 @@ groups:
         # that has stopped logging entirely is container-down-bpvps2's job, not this rule's.
         noDataState: OK
         execErrState: Error
-        for: 0s
+        for: 2m
         labels:
           app: booking
           severity: warning
         annotations:
           summary: "Booking backend errors on {{ $labels.container }}"
-          value: "{{ humanize $values.A.Value }} error lines in 5 minutes"
+          value: '{{ printf "%.0f" $values.A.Value }} error lines in 5 minutes'
+          action: 'Explore -> grafanacloud-logs: `{container="{{ $labels.container }}", level=~"error|fatal"} | json`'
           description: >-
-            More errors in five minutes than a healthy instance produces. Explore ->
-            grafanacloud-logs: `{container="{{ $labels.container }}", level="error"} | json` --
-            group by `requestId` first, then `tenantId` (an id, never a studio's name). A deploy
-            in the last few minutes is the usual cause. Runbook: docs/monitoring.md.
+            More errors than a healthy instance produces. A deploy in the last few minutes is
+            the usual cause. Group by `requestId`, then `tenantId` (an id, never a studio's name).
 
       # ── 2. Stripe webhook failure ────────────────────────────────────────────────────────
       # ANY error line from the Stripe webhook route, which sets webhook=stripe on its log
@@ -132,14 +133,11 @@ groups:
           severity: critical
         annotations:
           summary: "Booking Stripe webhook on {{ $labels.container }}"
-          value: "{{ humanize $values.A.Value }} failed in 5 minutes"
+          value: '{{ printf "%.0f" $values.A.Value }} failed in 5 minutes'
+          action: 'Explore: `{container="{{ $labels.container }}", level="error"} | json | webhook="stripe"` gives the eventId'
           description: >-
-            Stripe thinks it delivered an event the backend did not record -- a payment, a
-            refund or a subscription change may be missing. Explore -> grafanacloud-logs:
-            `{container="{{ $labels.container }}", level="error"} | json | webhook="stripe"`
-            gives the `eventId` and `eventType`; replay it from the Stripe dashboard once the
-            handler is fixed. A signature refusal logs at `warn` and does NOT fire this.
-            Runbook: docs/monitoring.md.
+            Stripe delivered an event the backend did not record: a payment, refund or
+            subscription change may be missing. Fix the handler, then replay it from Stripe.
 
   # ── 3. API down is NOT here. ───────────────────────────────────────────────────────────────
   # grafana/rules/endpoints.yml's `endpoint-down-2m` already covers it: a Grafana probe in
@@ -164,9 +162,29 @@ groups:
   - orgId: 1
     name: booking-jobs
     folder: Apps
-    # 5m, not 1m: each rule below reads a 25-hour window, and a 25-hour range query is not
-    # something to ask Loki for sixty times an hour per job on a free tier. A heartbeat that is
-    # allowed to be 25 hours old does not need minute resolution.
+    # ── A 2-hour window, not 25 (#54) ──────────────────────────────────────────────────────
+    # Both jobs log `cron job ok` every 15 minutes -- 8 lines in any 2 hours, 96 a day, on
+    # each instance (measured 2026-11-11). The window was 25 hours on the belief that they ran
+    # daily, so a dead scheduler took a day to notice; now it takes two hours and still
+    # tolerates seven missed runs in a row.
+    #
+    # ── One cause, one alert ───────────────────────────────────────────────────────────────
+    # When Loki refuses logs the lines stop ARRIVING, not being written, and all four rules
+    # fired for eleven days in October 2026 over a scheduler that was fine. So each rule also
+    # reads B from the usage datasource -- which does not depend on Loki: 1 when the month's
+    # allowance is spent (usage at 98% of the included figure or more), else 0. A rule fires
+    # only when no line arrived AND the allowance is not spent. While it is spent these are
+    # blind and say nothing; logs-dropped is the one alert, and its message says so.
+    #
+    # B is the ALLOWANCE, deliberately not "were any bytes refused in the window". A spent
+    # allowance refuses everything until the 1st, which is the case to stand down for. A
+    # short burst over the per-second limit refuses a few lines from whichever stream burst --
+    # and a gate that closed on any refused byte would let one noisy collector blind all four
+    # heartbeats for two hours at a time, indefinitely. If the usage figure cannot be read,
+    # `or vector(0)` leaves the gate open and the heartbeat alerts as if it were not there.
+    # The four copies of B must stay identical; scripts/test_grafana_apply.py checks that.
+    #
+    # 5m, not 1m: a heartbeat that may be two hours old does not need minute resolution.
     interval: 5m
     rules:
       - uid: bk-job-expirePackages-stg
@@ -174,29 +192,35 @@ groups:
         condition: C
         data:
           - refId: A
-            relativeTimeRange: {from: 90000, to: 0}
+            relativeTimeRange: {from: 7200, to: 0}
             datasourceUid: grafanacloud-logs
             model:
               refId: A
               queryType: instant
               expr: |
-                sum(count_over_time({container="booking-be-staging"} |= "cron job ok" | json | job="expirePackages" [25h])) or vector(0)
+                sum(count_over_time({container="booking-be-staging"} |= "cron job ok" | json | job="expirePackages" [2h])) or vector(0)
+          # B: is the logs allowance spent? (See "One cause, one alert" above the group.)
+          - refId: B
+            relativeTimeRange: {from: 7200, to: 0}
+            datasourceUid: grafanacloud-usage
+            model:
+              refId: B
+              instant: true
+              range: false
+              expr: (max(grafanacloud_org_logs_usage) >= bool 0.98 * max(grafanacloud_org_logs_included_usage)) or vector(0)
           - refId: C
-            relativeTimeRange: {from: 90000, to: 0}
+            relativeTimeRange: {from: 7200, to: 0}
             datasourceUid: __expr__
             model:
               refId: C
-              type: threshold
-              expression: A
-              conditions:
-                - evaluator: {type: lt, params: [1]}
+              type: math
+              expression: "$A < 1 && $B < 1"
         # See the file header: a Loki count over nothing returns NO SERIES, and Grafana reads
         # that as No Data, not as zero. `or vector(0)` makes the zero real; this makes even a
         # missing frame speak.
         noDataState: Alerting
         execErrState: Error
-        # Three evaluations. A heartbeat 25 hours stale is not more urgent for being reported
-        # fifteen minutes sooner, and this rides out one bad query.
+        # Three evaluations: this rides out one bad query.
         for: 15m
         labels:
           app: booking
@@ -206,44 +230,46 @@ groups:
           host: bpvps2
         annotations:
           summary: 'Booking job "expirePackages" on booking-be-staging'
-          value: "no `cron job ok` line in 25 hours"
+          value: "no `cron job ok` line in 2 hours"
+          action: "`ssh bp-bpvps2 'docker ps --filter name=booking-be-staging; docker logs --tail 200 booking-be-staging | grep -i cron'`"
           description: >-
-            The scheduler has not reported this job for over a day, so nothing it does
-            (expires packages whose term has run out)
-            has happened for any Tenant. This is a SCHEDULER heartbeat, not proof that a
-            given Tenant's daily run happened -- see docs/monitoring.md. First:
-            `ssh bp-bpvps2 'docker ps --filter name=booking-be-staging; docker logs --tail 100
-            booking-be-staging | grep -i cron'`. Then Explore -> grafanacloud-logs:
-            `{container="booking-be-staging"} |= "cron job" | json | job="expirePackages"`.
+            Nothing this job does (expires packages whose term has run out) has happened for any
+            Tenant for two hours. A scheduler heartbeat, not proof of any one Tenant's run.
 
       - uid: bk-job-sendLapsingAlerts-stg
         title: Booking job sendLapsingAlerts not running (staging)
         condition: C
         data:
           - refId: A
-            relativeTimeRange: {from: 90000, to: 0}
+            relativeTimeRange: {from: 7200, to: 0}
             datasourceUid: grafanacloud-logs
             model:
               refId: A
               queryType: instant
               expr: |
-                sum(count_over_time({container="booking-be-staging"} |= "cron job ok" | json | job="sendLapsingAlerts" [25h])) or vector(0)
+                sum(count_over_time({container="booking-be-staging"} |= "cron job ok" | json | job="sendLapsingAlerts" [2h])) or vector(0)
+          # B: is the logs allowance spent? (See "One cause, one alert" above the group.)
+          - refId: B
+            relativeTimeRange: {from: 7200, to: 0}
+            datasourceUid: grafanacloud-usage
+            model:
+              refId: B
+              instant: true
+              range: false
+              expr: (max(grafanacloud_org_logs_usage) >= bool 0.98 * max(grafanacloud_org_logs_included_usage)) or vector(0)
           - refId: C
-            relativeTimeRange: {from: 90000, to: 0}
+            relativeTimeRange: {from: 7200, to: 0}
             datasourceUid: __expr__
             model:
               refId: C
-              type: threshold
-              expression: A
-              conditions:
-                - evaluator: {type: lt, params: [1]}
+              type: math
+              expression: "$A < 1 && $B < 1"
         # See the file header: a Loki count over nothing returns NO SERIES, and Grafana reads
         # that as No Data, not as zero. `or vector(0)` makes the zero real; this makes even a
         # missing frame speak.
         noDataState: Alerting
         execErrState: Error
-        # Three evaluations. A heartbeat 25 hours stale is not more urgent for being reported
-        # fifteen minutes sooner, and this rides out one bad query.
+        # Three evaluations: this rides out one bad query.
         for: 15m
         labels:
           app: booking
@@ -253,44 +279,46 @@ groups:
           host: bpvps2
         annotations:
           summary: 'Booking job "sendLapsingAlerts" on booking-be-staging'
-          value: "no `cron job ok` line in 25 hours"
+          value: "no `cron job ok` line in 2 hours"
+          action: "`ssh bp-bpvps2 'docker ps --filter name=booking-be-staging; docker logs --tail 200 booking-be-staging | grep -i cron'`"
           description: >-
-            The scheduler has not reported this job for over a day, so nothing it does
-            (warns clients whose packages are about to lapse)
-            has happened for any Tenant. This is a SCHEDULER heartbeat, not proof that a
-            given Tenant's daily run happened -- see docs/monitoring.md. First:
-            `ssh bp-bpvps2 'docker ps --filter name=booking-be-staging; docker logs --tail 100
-            booking-be-staging | grep -i cron'`. Then Explore -> grafanacloud-logs:
-            `{container="booking-be-staging"} |= "cron job" | json | job="sendLapsingAlerts"`.
+            Nothing this job does (warns clients whose packages are about to lapse) has happened
+            for any Tenant for two hours. A scheduler heartbeat, not proof of any one Tenant's run.
 
       - uid: bk-job-expirePackages-prd
         title: Booking job expirePackages not running (prod)
         condition: C
         data:
           - refId: A
-            relativeTimeRange: {from: 90000, to: 0}
+            relativeTimeRange: {from: 7200, to: 0}
             datasourceUid: grafanacloud-logs
             model:
               refId: A
               queryType: instant
               expr: |
-                sum(count_over_time({container="booking-be-prod"} |= "cron job ok" | json | job="expirePackages" [25h])) or vector(0)
+                sum(count_over_time({container="booking-be-prod"} |= "cron job ok" | json | job="expirePackages" [2h])) or vector(0)
+          # B: is the logs allowance spent? (See "One cause, one alert" above the group.)
+          - refId: B
+            relativeTimeRange: {from: 7200, to: 0}
+            datasourceUid: grafanacloud-usage
+            model:
+              refId: B
+              instant: true
+              range: false
+              expr: (max(grafanacloud_org_logs_usage) >= bool 0.98 * max(grafanacloud_org_logs_included_usage)) or vector(0)
           - refId: C
-            relativeTimeRange: {from: 90000, to: 0}
+            relativeTimeRange: {from: 7200, to: 0}
             datasourceUid: __expr__
             model:
               refId: C
-              type: threshold
-              expression: A
-              conditions:
-                - evaluator: {type: lt, params: [1]}
+              type: math
+              expression: "$A < 1 && $B < 1"
         # See the file header: a Loki count over nothing returns NO SERIES, and Grafana reads
         # that as No Data, not as zero. `or vector(0)` makes the zero real; this makes even a
         # missing frame speak.
         noDataState: Alerting
         execErrState: Error
-        # Three evaluations. A heartbeat 25 hours stale is not more urgent for being reported
-        # fifteen minutes sooner, and this rides out one bad query.
+        # Three evaluations: this rides out one bad query.
         for: 15m
         labels:
           app: booking
@@ -300,44 +328,46 @@ groups:
           host: bpvps2
         annotations:
           summary: 'Booking job "expirePackages" on booking-be-prod'
-          value: "no `cron job ok` line in 25 hours"
+          value: "no `cron job ok` line in 2 hours"
+          action: "`ssh bp-bpvps2 'docker ps --filter name=booking-be-prod; docker logs --tail 200 booking-be-prod | grep -i cron'`"
           description: >-
-            The scheduler has not reported this job for over a day, so nothing it does
-            (expires packages whose term has run out)
-            has happened for any Tenant. This is a SCHEDULER heartbeat, not proof that a
-            given Tenant's daily run happened -- see docs/monitoring.md. First:
-            `ssh bp-bpvps2 'docker ps --filter name=booking-be-prod; docker logs --tail 100
-            booking-be-prod | grep -i cron'`. Then Explore -> grafanacloud-logs:
-            `{container="booking-be-prod"} |= "cron job" | json | job="expirePackages"`.
+            Nothing this job does (expires packages whose term has run out) has happened for any
+            Tenant for two hours. A scheduler heartbeat, not proof of any one Tenant's run.
 
       - uid: bk-job-sendLapsingAlerts-prd
         title: Booking job sendLapsingAlerts not running (prod)
         condition: C
         data:
           - refId: A
-            relativeTimeRange: {from: 90000, to: 0}
+            relativeTimeRange: {from: 7200, to: 0}
             datasourceUid: grafanacloud-logs
             model:
               refId: A
               queryType: instant
               expr: |
-                sum(count_over_time({container="booking-be-prod"} |= "cron job ok" | json | job="sendLapsingAlerts" [25h])) or vector(0)
+                sum(count_over_time({container="booking-be-prod"} |= "cron job ok" | json | job="sendLapsingAlerts" [2h])) or vector(0)
+          # B: is the logs allowance spent? (See "One cause, one alert" above the group.)
+          - refId: B
+            relativeTimeRange: {from: 7200, to: 0}
+            datasourceUid: grafanacloud-usage
+            model:
+              refId: B
+              instant: true
+              range: false
+              expr: (max(grafanacloud_org_logs_usage) >= bool 0.98 * max(grafanacloud_org_logs_included_usage)) or vector(0)
           - refId: C
-            relativeTimeRange: {from: 90000, to: 0}
+            relativeTimeRange: {from: 7200, to: 0}
             datasourceUid: __expr__
             model:
               refId: C
-              type: threshold
-              expression: A
-              conditions:
-                - evaluator: {type: lt, params: [1]}
+              type: math
+              expression: "$A < 1 && $B < 1"
         # See the file header: a Loki count over nothing returns NO SERIES, and Grafana reads
         # that as No Data, not as zero. `or vector(0)` makes the zero real; this makes even a
         # missing frame speak.
         noDataState: Alerting
         execErrState: Error
-        # Three evaluations. A heartbeat 25 hours stale is not more urgent for being reported
-        # fifteen minutes sooner, and this rides out one bad query.
+        # Three evaluations: this rides out one bad query.
         for: 15m
         labels:
           app: booking
@@ -347,12 +377,8 @@ groups:
           host: bpvps2
         annotations:
           summary: 'Booking job "sendLapsingAlerts" on booking-be-prod'
-          value: "no `cron job ok` line in 25 hours"
+          value: "no `cron job ok` line in 2 hours"
+          action: "`ssh bp-bpvps2 'docker ps --filter name=booking-be-prod; docker logs --tail 200 booking-be-prod | grep -i cron'`"
           description: >-
-            The scheduler has not reported this job for over a day, so nothing it does
-            (warns clients whose packages are about to lapse)
-            has happened for any Tenant. This is a SCHEDULER heartbeat, not proof that a
-            given Tenant's daily run happened -- see docs/monitoring.md. First:
-            `ssh bp-bpvps2 'docker ps --filter name=booking-be-prod; docker logs --tail 100
-            booking-be-prod | grep -i cron'`. Then Explore -> grafanacloud-logs:
-            `{container="booking-be-prod"} |= "cron job" | json | job="sendLapsingAlerts"`.
+            Nothing this job does (warns clients whose packages are about to lapse) has happened
+            for any Tenant for two hours. A scheduler heartbeat, not proof of any one Tenant's run.

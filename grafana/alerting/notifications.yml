@@ -33,7 +33,7 @@ contact_points:
       url: ${DISCORD_WEBHOOK_URL}
 
       # Default Discord formatting dumps every label and annotation of every instance -- a wall
-      # nobody reads on a phone. So: one line per alert, the description once, and the STATE
+      # nobody reads on a phone. So: one line per alert, one line of what to do, and the STATE
       # said in words. Sources: docs/research/grafana-discord-alert-format.md.
       #
       # Grafana re-renders a rule's annotations when it resolves, so a summary written as "X is
@@ -41,11 +41,39 @@ contact_points:
       # follows: `summary` names WHAT is checked and reads right in both states; `value` says
       # what is wrong and is printed only under Firing. The template supplies the state.
       #
+      # Every rule carries a third annotation, `action` (#54): the first thing to do, in 120
+      # characters or fewer, printed as "Do:". The description is the fallback and the runbook
+      # holds the rest -- a paragraph in an alert is a paragraph nobody reads at 2am.
+      # scripts/test_grafana_apply.py fails a rule without one, or with a long one.
+      #
+      # One message is one HOST's incident (the policy groups by folder and host), so it can
+      # carry several rules. "Do:" is printed after the first alert of each run that shares it,
+      # not once per alert: eight containers down is one instruction, not eight.
+      #
+      # The dot is the severity: red critical, orange warning, blue info. Each severity has its
+      # own route, so one message never mixes them. No severity at all (a typo, a rule that
+      # forgot it) is shown red and called ALERT.
+      #
+      # A rule that could not be evaluated is NOT the thing it watches being broken. Grafana
+      # sends those as `DatasourceNoData` / `DatasourceError` with the rule's name in
+      # `rulename` and the rule's annotations rendered against nothing -- which used to print
+      # "` on : failing from every probe`", an outage that had not happened. They get their own
+      # line, which says it is the check.
+      #
       # One notification can carry firing AND resolved alerts, and Discord colours the whole
       # card red if any one fires -- so they are two labelled lists, never one mixed list.
+      # Ten lines at most per list: Discord cuts an embed at 4,096 characters, mid-word.
       #
-      # "N firing" in the title is the diagnosis. "Container down on bpvps1 · 11 firing" is not
-      # eleven failures; it is the agent or the host being gone.
+      # "Silence all" opens the silence form filled in with the GROUP's labels (folder, host,
+      # severity, and the rule if there is only one), so one click quiets the whole message.
+      # Grafana's own per-alert link silenced one alert of eight. The form still asks for an
+      # end time: give it one (docs/monitoring.md, "Silencing").
+      # The link is only offered when it is NARROW: the group has a host, or every alert in it
+      # is one rule. The account-wide budget rules carry no host, and a message holding two of
+      # them would otherwise build a silence on folder + severity alone -- every warning on
+      # both hosts, until the 1st. That message gets Grafana's per-alert link instead, named
+      # for what it does. The base URL has its trailing slash trimmed, so a root_url written
+      # either way gives one slash.
       #
       # Message inside the coloured card (grafana/alerting#368, "Show Message in Embed" in the
       # UI). Cost: @mentions stop pinging, and none are sent. On a build without it, the key is
@@ -53,11 +81,17 @@ contact_points:
       use_embed_description: true
 
       title: >-
+        {{- $name := .CommonLabels.alertname -}}
+        {{- if eq $name "DatasourceNoData" }}{{ $name = "No data" }}{{ end -}}
+        {{- if eq $name "DatasourceError" }}{{ $name = "Query error" }}{{ end -}}
         {{- if .Alerts.Firing -}}
-        🔴 {{ with .CommonLabels.severity }}{{ toUpper . }}{{ else }}FIRING{{ end }}
+        {{- if eq .CommonLabels.severity "critical" }}🔴 CRITICAL
+        {{- else if eq .CommonLabels.severity "warning" }}🟠 WARNING
+        {{- else if eq .CommonLabels.severity "info" }}🔵 INFO
+        {{- else }}🔴 ALERT{{ end }}
         {{- else -}}
         ✅ RESOLVED
-        {{- end }} · {{ .CommonLabels.alertname }}
+        {{- end }} · {{ if $name }}{{ $name }}{{ with .CommonLabels.rulename }}: {{ . }}{{ end }}{{ else }}{{ with .GroupLabels.host }}{{ . }}{{ else }}several alerts{{ end }}{{ end }}
         {{- if gt (len .Alerts.Firing) 1 }} · {{ len .Alerts.Firing }} firing{{ end }}
         {{- if and .Alerts.Firing .Alerts.Resolved }} · {{ len .Alerts.Resolved }} cleared{{ end }}
 
@@ -65,20 +99,42 @@ contact_points:
       message: |-
         {{- if .Alerts.Firing -}}
         **Firing**
-        {{- range .Alerts.Firing }}
-        • {{ .Annotations.summary }}{{ with .Annotations.value }}: **{{ . }}**{{ end }} · since {{ .StartsAt | tz "Asia/Kuala_Lumpur" | date "02 Jan 15:04" }}
+        {{- $do := "" }}
+        {{- range $i, $a := .Alerts.Firing }}
+        {{- if lt $i 10 }}
+        {{- $since := $a.StartsAt | tz "Asia/Kuala_Lumpur" | date "02 Jan 15:04" }}
+        {{- if eq $a.Labels.alertname "DatasourceNoData" }}
+        • {{ $a.Labels.rulename }}: **no data** · since {{ $since }}
+        > The check returned nothing. That is the check itself, not the service it watches.
+        {{- else if eq $a.Labels.alertname "DatasourceError" }}
+        • {{ $a.Labels.rulename }}: **query error** · since {{ $since }}
+        > The check could not run. That is the check itself, not the service it watches.
+        {{- else }}
+        • {{ $a.Annotations.summary }}{{ with $a.Annotations.value }}: **{{ . }}**{{ end }} · since {{ $since }}
+        {{- $next := or $a.Annotations.action $a.Annotations.description }}
+        {{- if and $next (ne $next $do) }}
+        > Do: {{ $next }}
+        {{- $do = $next }}
         {{- end }}
-        {{ with index .Alerts.Firing 0 }}{{ with .Annotations.description }}
-        > {{ . }}
-        {{ end }}
-        [Runbook]({{ with .Annotations.runbook_url }}{{ . }}{{ else }}https://github.com/Blueprint-Agency/infrastructure/blob/main/docs/monitoring.md#what-each-alert-means-and-the-first-three-things-to-check{{ end }}) · [Silence]({{ .SilenceURL }})
         {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- if gt (len .Alerts.Firing) 10 }}
+        • and more: {{ len .Alerts.Firing }} firing in all
+        {{- end }}
+
+        [Runbook]({{ with index .Alerts.Firing 0 }}{{ with .Annotations.runbook_url }}{{ . }}{{ else }}https://github.com/Blueprint-Agency/infrastructure/blob/main/docs/monitoring.md#what-each-alert-means-and-the-first-three-things-to-check{{ end }}{{ end }}) · {{ if or .GroupLabels.host .CommonLabels.alertname }}[Silence all]({{ reReplaceAll "/+$" "" .ExternalURL }}/alerting/silence/new?alertmanager=grafana{{ range .GroupLabels.SortedPairs }}{{ if .Value }}&matcher={{ .Name | urlquery }}%3D{{ .Value | urlquery }}{{ end }}{{ end }}{{ with .CommonLabels.severity }}&matcher=severity%3D{{ . | urlquery }}{{ end }}{{ with .CommonLabels.alertname }}&matcher=alertname%3D{{ . | urlquery }}{{ end }}){{ else }}[Silence the first]({{ (index .Alerts.Firing 0).SilenceURL }}){{ end }}
         {{- end }}
         {{- if .Alerts.Resolved }}
         {{ if .Alerts.Firing }}
         {{ end }}**Resolved**
-        {{- range .Alerts.Resolved }}
-        • {{ .Annotations.summary }} · {{ .StartsAt | tz "Asia/Kuala_Lumpur" | date "02 Jan 15:04" }} → {{ .EndsAt | tz "Asia/Kuala_Lumpur" | date "15:04" }}
+        {{- range $i, $a := .Alerts.Resolved }}
+        {{- if lt $i 10 }}
+        • {{ with $a.Labels.rulename }}{{ . }} (the check itself){{ else }}{{ $a.Annotations.summary }}{{ end }} · {{ $a.StartsAt | tz "Asia/Kuala_Lumpur" | date "02 Jan 15:04" }} → {{ $a.EndsAt | tz "Asia/Kuala_Lumpur" | date "02 Jan 15:04" }}
+        {{- end }}
+        {{- end }}
+        {{- if gt (len .Alerts.Resolved) 10 }}
+        • and more: {{ len .Alerts.Resolved }} resolved in all
         {{- end }}
         {{- end }}
 
@@ -98,14 +154,19 @@ contact_points:
 severity_timings:
   # 10s, not the 30s default. grafana/rules/endpoints.yml is timed around it, and #24's
   # acceptance test is "Traefik stopped -> alert on a phone within five minutes".
+  #
+  # Repeats are REMINDERS, not the alert (#54): a critical still firing is said again every 4
+  # hours, a warning once a day. At 1 h a critical that could not be fixed until the 1st of the
+  # month was said ~165 times. A condition that is known and has to wait gets a silence with an
+  # end date, not a muted phone (docs/monitoring.md, "Silencing").
   critical: &critical_timing
     group_wait: 10s
     group_interval: 5m
-    repeat_interval: 1h
+    repeat_interval: 4h
   warning: &warning_timing
     group_wait: 1m
     group_interval: 10m
-    repeat_interval: 12h
+    repeat_interval: 24h
   # info is the textfile canary, which is MEANT to fire during the seam test. It must never
   # be urgent: slow first send, and a day between repeats.
   info: &info_timing
@@ -113,10 +174,20 @@ severity_timings:
     group_interval: 30m
     repeat_interval: 24h
 
-# The routing tree. `group_by` includes `host` so a bpvps1 problem and a bpvps2 problem never
-# arrive as one message: they are two incidents and usually two causes. Children inherit it; an
-# app alert carrying no `host` groups under the empty value, which is what we want, and
-# `grafana_folder` already keeps the Apps folder's alerts out of Monitoring's groups.
+# The routing tree. `group_by` is folder and HOST, and no longer the rule's name (#54): one
+# incident on one host is one message that updates, where a dead host used to be about six
+# separate ones. bpvps1 and bpvps2 still never share a message -- two incidents, usually two
+# causes -- and each severity is its own route, so a warning never rides in a critical's
+# message. Accepted cost: an unrelated alert of the same severity on the same host joins the
+# open message instead of starting its own; the title's count goes up and the line is added.
+# Children inherit the grouping; an alert carrying no `host` (the account-wide budget rules)
+# groups under the empty value, which is what we want, and `grafana_folder` keeps the Apps
+# folder's alerts out of Monitoring's groups.
+#
+# The root carries the critical timings itself. An alert with no severity, or a misspelled one,
+# matches no child and is delivered by the root -- which without timings of its own would use
+# Grafana's defaults (30s / 5m / 4h), a third behaviour nobody chose. Loud is the safe way to
+# be wrong. scripts/test_grafana_apply.py also fails a rule whose severity has no route.
 #
 # ⚠️ ORDER IS LOAD-BEARING. Matching stops at the first matching child (Grafana: "Once a matching
 # policy is found, the system does not continue to look for sibling policies"; Alertmanager:
@@ -126,7 +197,8 @@ severity_timings:
 # documented ordering, most specific first. Sources: docs/research/grafana-multi-app-alert-routing.md.
 policy:
   receiver: discord
-  group_by: [grafana_folder, alertname, host]
+  group_by: [grafana_folder, host]
+  <<: *critical_timing
   routes:
     # ── Apps. One block each, matching the `app` label the rules carry. ────────────────────
     # The label is the contract, not the folder: a rule filed anywhere reaches this channel if

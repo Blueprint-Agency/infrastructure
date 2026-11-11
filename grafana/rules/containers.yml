@@ -4,9 +4,14 @@
 # container-down-<host> declares, by name, every container that host's compose files
 # define. CI (vps/shared/check-monitoring.py) fails when a compose file gains a container
 # this rule does not name, or when a selector lacks its host matcher. The agent's own
-# container is exempt: an agent cannot report its own absence. If the agent dies, every
-# container below goes absent at once and this rule fires for all of them -- read that
-# pattern as "monitoring is down", not as six outages.
+# container is exempt: an agent cannot report its own absence.
+#
+# If the agent dies, every container below goes absent at once. That used to fire for all of
+# them -- eight messages for one cause, on 2026-10-25 -- so each rule now ALSO requires that the
+# host's own metrics are arriving (#54): `and on () count_over_time(node_memory_MemTotal_bytes
+# [2m]) > 0`. The gate closes two minutes after the agent's last sample, before the 3-minute
+# absence can be true, so a dead agent or a dead host is ONE alert: metrics-stale-<host>
+# (ingestion.yml). A container that stops while the agent lives is untouched.
 #
 # Why absent_over_time and not a rule over container_last_seen as a whole: a stopped
 # container's series simply stops, and a multi-dimensional Grafana rule treats a vanished
@@ -40,11 +45,14 @@ groups:
               instant: true
               range: false
               expr: |
-                absent_over_time(container_last_seen{host="bpvps1", container="traefik"}[3m])
-                or absent_over_time(container_last_seen{host="bpvps1", container="stalwart"}[3m])
-                or absent_over_time(container_last_seen{host="bpvps1", container="bulwark"}[3m])
-                or absent_over_time(container_last_seen{host="bpvps1", container="unbound"}[3m])
-                or absent_over_time(container_last_seen{host="bpvps1", container="backup"}[3m])
+                (
+                  absent_over_time(container_last_seen{host="bpvps1", container="traefik"}[3m])
+                  or absent_over_time(container_last_seen{host="bpvps1", container="stalwart"}[3m])
+                  or absent_over_time(container_last_seen{host="bpvps1", container="bulwark"}[3m])
+                  or absent_over_time(container_last_seen{host="bpvps1", container="unbound"}[3m])
+                  or absent_over_time(container_last_seen{host="bpvps1", container="backup"}[3m])
+                )
+                and on () (count_over_time(node_memory_MemTotal_bytes{host="bpvps1"}[2m]) > 0)
           - refId: C
             relativeTimeRange:
               from: 600
@@ -67,11 +75,10 @@ groups:
         annotations:
           summary: "{{ $labels.container }} on {{ $labels.host }}"
           value: "no metrics for 3 minutes"
+          action: "`ssh bp-bpvps1 'docker ps -a'`, then `docker logs --tail 50 <name>` for the one that is gone"
           description: >-
-            The container is stopped, crash-looping, or was removed. stalwart, bulwark or unbound
-            down means mail for all three domains. If every container on the host fires at once,
-            the monitoring agent (container `alloy`) or the host itself is down instead.
-            Runbook: docs/monitoring.md.
+            Stopped, crash-looping or removed. stalwart, bulwark or unbound down means mail for
+            all three domains.
 
       - uid: container-down-bpvps2
         title: Container down on bpvps2
@@ -87,13 +94,16 @@ groups:
               instant: true
               range: false
               expr: |
-                absent_over_time(container_last_seen{host="bpvps2", container="traefik"}[3m])
-                or absent_over_time(container_last_seen{host="bpvps2", container="booking-be-staging"}[3m])
-                or absent_over_time(container_last_seen{host="bpvps2", container="booking-db-staging"}[3m])
-                or absent_over_time(container_last_seen{host="bpvps2", container="booking-be-prod"}[3m])
-                or absent_over_time(container_last_seen{host="bpvps2", container="booking-db-prod"}[3m])
-                or absent_over_time(container_last_seen{host="bpvps2", container="backup"}[3m])
-                or absent_over_time(container_last_seen{host="bpvps2", container="db-observability"}[3m])
+                (
+                  absent_over_time(container_last_seen{host="bpvps2", container="traefik"}[3m])
+                  or absent_over_time(container_last_seen{host="bpvps2", container="booking-be-staging"}[3m])
+                  or absent_over_time(container_last_seen{host="bpvps2", container="booking-db-staging"}[3m])
+                  or absent_over_time(container_last_seen{host="bpvps2", container="booking-be-prod"}[3m])
+                  or absent_over_time(container_last_seen{host="bpvps2", container="booking-db-prod"}[3m])
+                  or absent_over_time(container_last_seen{host="bpvps2", container="backup"}[3m])
+                  or absent_over_time(container_last_seen{host="bpvps2", container="db-observability"}[3m])
+                )
+                and on () (count_over_time(node_memory_MemTotal_bytes{host="bpvps2"}[2m]) > 0)
           - refId: C
             relativeTimeRange:
               from: 600
@@ -117,8 +127,7 @@ groups:
         annotations:
           summary: "{{ $labels.container }} on {{ $labels.host }}"
           value: "no metrics for 3 minutes"
+          action: "`ssh bp-bpvps2 'docker ps -a'`, then `docker logs --tail 50 <name>` for the one that is gone"
           description: >-
-            The container is stopped, crash-looping, or was removed. booking-*-staging holds
-            the real studio data; booking-*-prod is the fresh instance. If every container on
-            the host fires at once, the monitoring agent (container `alloy`) or the host
-            itself is down instead. Runbook: docs/monitoring.md.
+            Stopped, crash-looping or removed. booking-*-staging holds the real studio data;
+            booking-*-prod is the fresh instance.

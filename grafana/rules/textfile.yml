@@ -39,8 +39,7 @@ groups:
               expression: A
               conditions:
                 - evaluator: {type: gt, params: [0]}
-        # No series means no agent -- container-down-<host> reports that, the only way it can:
-        # every other container on the host goes absent at once.
+        # No series means no agent -- metrics-stale-<host> (ingestion.yml) reports that.
         noDataState: OK
         execErrState: Error
         for: 5m
@@ -49,10 +48,10 @@ groups:
         annotations:
           summary: "Textfile metrics on {{ $labels.host }}"
           value: "a *.prom file cannot be parsed"
+          action: "`ssh bp-{{ $labels.host }} 'docker logs --tail 50 alloy'` names the broken *.prom file"
           description: >-
             The agent skips a malformed file, so that producer's metrics stop and its staleness
-            alert follows. `ssh bp-{{ $labels.host }} 'docker logs --tail 50 alloy'` names the file.
-            The usual cause is a producer writing in place instead of tmp + mv. docs/textfile-metrics.md.
+            alert follows. Usual cause: a producer writing in place instead of tmp + mv.
 
       # ── Producer: the textfile probes (#25) -- probes/bin/probe.sh in the monitoring stack ──
       # Each job's file carries its own heartbeat AND how old that may get (5 min for the
@@ -61,6 +60,11 @@ groups:
       # agent's scrape owns `job` and renames a file's own to exported_job). A job that could not read its source (psql
       # failed, tailscaled did not answer, the mail prober found it IS the mail host) writes
       # nothing on purpose, and lands here.
+      #
+      # The age half reads `last_over_time(...[15m])`, never the bare series (#54). A bare
+      # selector goes stale 5 minutes after its last sample and absent_over_time[15m] only
+      # takes over 10 minutes later: in between the query returned nothing, which Grafana read
+      # as resolved and which reset `for`. Same window on both halves, no gap.
       - uid: probes-stale-bpvps1
         title: Probe stopped on bpvps1
         condition: C
@@ -73,9 +77,12 @@ groups:
               instant: true
               range: false
               expr: |
-                (time() - probes_last_success_timestamp_seconds{host="bpvps1"}
-                  > on (host, probe) probes_max_age_seconds{host="bpvps1"})
-                or absent_over_time(probes_last_success_timestamp_seconds{host="bpvps1"}[15m])
+                (
+                  (time() - last_over_time(probes_last_success_timestamp_seconds{host="bpvps1"}[15m])
+                    > on (host, probe) last_over_time(probes_max_age_seconds{host="bpvps1"}[15m]))
+                  or absent_over_time(probes_last_success_timestamp_seconds{host="bpvps1"}[15m])
+                )
+                and on () (count_over_time(node_memory_MemTotal_bytes{host="bpvps1"}[2m]) > 0)
           - refId: C
             relativeTimeRange: {from: 900, to: 0}
             datasourceUid: __expr__
@@ -94,10 +101,9 @@ groups:
         annotations:
           summary: '{{ with $labels.probe }}Probe "{{ . }}"{{ else }}Every probe{{ end }} on bpvps1'
           value: "{{ if $labels.probe }}no successful run within its max age{{ else }}no heartbeat at all{{ end }}"
+          action: "`ssh bp-bpvps1 'docker ps --filter name=probes; docker logs --tail 50 probes'` shows why the job fails"
           description: >-
-            `ssh bp-bpvps1 'docker ps --filter name=probes; docker logs --tail 50 probes'` -- a failing
-            job logs why. While it is stale, the alert it feeds (restarts, Postgres, Tailscale) cannot
-            fire. Runbook: docs/monitoring.md.
+            While it is stale, the alert it feeds (restarts, Postgres, Tailscale) cannot fire.
 
       - uid: probes-stale-bpvps2
         title: Probe stopped on bpvps2
@@ -111,10 +117,13 @@ groups:
               instant: true
               range: false
               expr: |
-                (time() - probes_last_success_timestamp_seconds{host="bpvps2"}
-                  > on (host, probe) probes_max_age_seconds{host="bpvps2"})
-                or absent_over_time(probes_last_success_timestamp_seconds{host="bpvps2"}[15m])
-                or absent_over_time(probes_last_success_timestamp_seconds{host="bpvps2", probe="mail"}[15m])
+                (
+                  (time() - last_over_time(probes_last_success_timestamp_seconds{host="bpvps2"}[15m])
+                    > on (host, probe) last_over_time(probes_max_age_seconds{host="bpvps2"}[15m]))
+                  or absent_over_time(probes_last_success_timestamp_seconds{host="bpvps2"}[15m])
+                  or absent_over_time(probes_last_success_timestamp_seconds{host="bpvps2", probe="mail"}[15m])
+                )
+                and on () (count_over_time(node_memory_MemTotal_bytes{host="bpvps2"}[2m]) > 0)
           - refId: C
             relativeTimeRange: {from: 900, to: 0}
             datasourceUid: __expr__
@@ -133,15 +142,30 @@ groups:
         annotations:
           summary: '{{ with $labels.probe }}Probe "{{ . }}"{{ else }}Every probe{{ end }} on bpvps2'
           value: "{{ if $labels.probe }}no successful run within its max age{{ else }}no heartbeat at all{{ end }}"
+          action: "`ssh bp-bpvps2 'docker ps --filter name=probes; docker logs --tail 50 probes'` shows why the job fails"
           description: >-
-            `ssh bp-bpvps2 'docker ps --filter name=probes; docker logs --tail 50 probes'` -- a failing
-            job logs why. probe=mail stale or absent means bpvps1's mail ports are NOT being watched --
-            bpvps2 is the only mail prober, so its mail heartbeat is required, not optional (was
-            MAIL_PROBE_TARGET removed from its compose?). Runbook:
-            docs/monitoring.md.
+            While it is stale, the alert it feeds cannot fire. probe=mail stale means bpvps1's
+            mail ports are NOT being watched: bpvps2 is the only mail prober.
 
       # ── Producer: the backup job (#27, #28), after each target's snapshot ────────────────
       # Nightly (bpvps2 03:30, bpvps1 04:30 KL), so 26 h is one missed night plus slack.
+      #
+      # TWO tiers per host (#54). One missed night is a WARNING: last night's snapshot is still
+      # there and tonight's run may simply work. Two missed nights (50 h) is CRITICAL:
+      # backup-critical-<host>, below each. The warning stops at 51 h so the critical replaces
+      # it rather than joining it -- an hour after the critical starts, not at the same moment,
+      # so there is never a stretch where the warning has resolved and the critical is still
+      # waiting out its `for`. A heartbeat that is missing altogether warns after 15 minutes
+      # (the file is gone, the last snapshot is not) and is critical as well once no sample
+      # has been seen for 50 hours; that warning has no age to stop at, and stays on beside it.
+      # The age reads last_over_time[15m] for the reason given above probes-stale.
+      #
+      # Every staleness rule in this file also requires the host's own metrics to be arriving
+      # (`and on () count_over_time(node_memory_MemTotal_bytes[2m]) > 0`), like container-down
+      # (containers.yml, #54). When the agent dies EVERY textfile series goes absent, and
+      # these used to answer "every probe stopped" and "every backup target has no heartbeat"
+      # twenty minutes into an outage that was neither. A dead agent is metrics-stale-<host>,
+      # once. The cost is stated in the runbook: while it fires, probes and backups are unwatched.
       - uid: backup-stale-bpvps1
         title: Backup heartbeat stale on bpvps1
         condition: C
@@ -154,10 +178,54 @@ groups:
               instant: true
               range: false
               expr: |
-                (time() - backup_last_success_timestamp_seconds{host="bpvps1"} > 26 * 3600)
-                or absent_over_time(backup_last_success_timestamp_seconds{host="bpvps1"}[15m])
+                (
+                  ((time() - last_over_time(backup_last_success_timestamp_seconds{host="bpvps1"}[15m]) > 26 * 3600) <= 51 * 3600)
+                  or absent_over_time(backup_last_success_timestamp_seconds{host="bpvps1"}[15m])
+                )
+                and on () (count_over_time(node_memory_MemTotal_bytes{host="bpvps1"}[2m]) > 0)
           - refId: C
             relativeTimeRange: {from: 900, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+          host: bpvps1
+        annotations:
+          summary: '{{ with $labels.target }}Backup "{{ . }}"{{ else }}Every backup target{{ end }} on bpvps1'
+          value: "{{ if $labels.target }}no success in over 26 hours (one night missed){{ else }}no heartbeat at all{{ end }}"
+          runbook_url: https://github.com/Blueprint-Agency/infrastructure/blob/main/docs/backup-restore.md
+          action: "`ssh bp-bpvps1 'docker logs --tail 100 backup'`. To run it now: `docker exec backup /app/bin/backup.sh`"
+          description: >-
+            A target's snapshot failed last night, or backup.prom is gone. The previous snapshot
+            is still in the repository.
+
+      - uid: backup-critical-bpvps1
+        title: Backup missed two nights on bpvps1
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 183600, to: 0}
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                (
+                  (time() - last_over_time(backup_last_success_timestamp_seconds{host="bpvps1"}[15m]) > 50 * 3600)
+                  or absent_over_time(backup_last_success_timestamp_seconds{host="bpvps1"}[50h])
+                )
+                and on () (count_over_time(node_memory_MemTotal_bytes{host="bpvps1"}[2m]) > 0)
+          - refId: C
+            relativeTimeRange: {from: 183600, to: 0}
             datasourceUid: __expr__
             model:
               refId: C
@@ -173,13 +241,12 @@ groups:
           host: bpvps1
         annotations:
           summary: '{{ with $labels.target }}Backup "{{ . }}"{{ else }}Every backup target{{ end }} on bpvps1'
-          value: "{{ if $labels.target }}no success in 26 hours{{ else }}no heartbeat at all{{ end }}"
+          value: "{{ if $labels.target }}no success in over 50 hours (two nights missed){{ else }}no heartbeat for 50 hours{{ end }}"
           runbook_url: https://github.com/Blueprint-Agency/infrastructure/blob/main/docs/backup-restore.md
+          action: "`ssh bp-bpvps1 'docker logs --tail 100 backup'`. To run it now: `docker exec backup /app/bin/backup.sh`"
           description: >-
-            Either a target's snapshot failed last night, or backup.prom is gone. Check
-            `ssh bp-bpvps1 'docker ps --filter name=backup; docker logs --tail 100 backup'`. If
-            the agent itself is down, container-down-bpvps1 fires alongside. Runbook:
-            docs/backup-restore.md.
+            Two nightly runs in a row did not succeed. The newest snapshot of the mail store is
+            over two days old.
 
       - uid: backup-stale-bpvps2
         title: Backup heartbeat stale on bpvps2
@@ -193,8 +260,11 @@ groups:
               instant: true
               range: false
               expr: |
-                (time() - backup_last_success_timestamp_seconds{host="bpvps2"} > 26 * 3600)
-                or absent_over_time(backup_last_success_timestamp_seconds{host="bpvps2"}[15m])
+                (
+                  ((time() - last_over_time(backup_last_success_timestamp_seconds{host="bpvps2"}[15m]) > 26 * 3600) <= 51 * 3600)
+                  or absent_over_time(backup_last_success_timestamp_seconds{host="bpvps2"}[15m])
+                )
+                and on () (count_over_time(node_memory_MemTotal_bytes{host="bpvps2"}[2m]) > 0)
           - refId: C
             relativeTimeRange: {from: 900, to: 0}
             datasourceUid: __expr__
@@ -209,17 +279,57 @@ groups:
         execErrState: Error
         for: 5m
         labels:
+          severity: warning
+          host: bpvps2
+        annotations:
+          summary: '{{ with $labels.target }}Backup "{{ . }}"{{ else }}Every backup target{{ end }} on bpvps2'
+          value: "{{ if $labels.target }}no success in over 26 hours (one night missed){{ else }}no heartbeat at all{{ end }}"
+          runbook_url: https://github.com/Blueprint-Agency/infrastructure/blob/main/docs/backup-restore.md
+          action: "`ssh bp-bpvps2 'docker logs --tail 100 backup'`. To run it now: `docker exec backup /app/bin/backup.sh`"
+          description: >-
+            A target's snapshot failed last night, or backup.prom is gone. The previous snapshot
+            is still in the repository.
+
+      - uid: backup-critical-bpvps2
+        title: Backup missed two nights on bpvps2
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 183600, to: 0}
+            datasourceUid: grafanacloud-prom
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                (
+                  (time() - last_over_time(backup_last_success_timestamp_seconds{host="bpvps2"}[15m]) > 50 * 3600)
+                  or absent_over_time(backup_last_success_timestamp_seconds{host="bpvps2"}[50h])
+                )
+                and on () (count_over_time(node_memory_MemTotal_bytes{host="bpvps2"}[2m]) > 0)
+          - refId: C
+            relativeTimeRange: {from: 183600, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
           severity: critical
           host: bpvps2
         annotations:
           summary: '{{ with $labels.target }}Backup "{{ . }}"{{ else }}Every backup target{{ end }} on bpvps2'
-          value: "{{ if $labels.target }}no success in 26 hours{{ else }}no heartbeat at all{{ end }}"
+          value: "{{ if $labels.target }}no success in over 50 hours (two nights missed){{ else }}no heartbeat for 50 hours{{ end }}"
           runbook_url: https://github.com/Blueprint-Agency/infrastructure/blob/main/docs/backup-restore.md
+          action: "`ssh bp-bpvps2 'docker logs --tail 100 backup'`. To run it now: `docker exec backup /app/bin/backup.sh`"
           description: >-
-            Either a target's snapshot failed last night, or backup.prom is gone. Check
-            `ssh bp-bpvps2 'docker ps --filter name=backup; docker logs --tail 100 backup'`. If
-            the agent itself is down, container-down-bpvps2 fires alongside. Runbook:
-            docs/backup-restore.md.
+            Two nightly runs in a row did not succeed. The newest snapshot of the booking
+            databases, the real studio data among them, is over two days old.
 
       # Producer: canary.prom -- the seam's own test fixture, not a service. Inert while the file
       # does not exist on any host. The test in docs/textfile-metrics.md writes it, lets it age
@@ -253,6 +363,7 @@ groups:
         annotations:
           summary: "Textfile canary on {{ $labels.host }}"
           value: "{{ humanizeDuration $values.A.Value }} old"
+          action: "Delete /textfile/canary.prom on {{ $labels.host }}, unless the seam test is running right now"
           description: >-
             Expected only during the textfile seam test in docs/textfile-metrics.md. Outside it, someone
             left /textfile/canary.prom behind: delete it and this resolves.

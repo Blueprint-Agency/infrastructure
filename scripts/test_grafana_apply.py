@@ -311,4 +311,79 @@ for path in sorted((HERE.parent / "grafana" / "rules").glob("*.yml")):
 for path in sorted((HERE.parent / "grafana" / "dashboards").glob("*.json")):
     ga.dashboard(ga.load_json(path), "monitoring")
 
+# ── Routes: what the file says is what is sent, or the run fails (#54) ───────────────────────
+# route() used to copy three timings and drop every other key in silence, so `continue: true`
+# or a route-level `group_by` looked applied and was not.
+FULL = {"contact_points": [{"name": "a", "type": "discord", "settings": {}}],
+        "policy": {"receiver": "a", "group_by": ["grafana_folder", "host"], "group_wait": "10s",
+                   "group_interval": "5m", "repeat_interval": "4h",
+                   "routes": [{"receiver": "a", "matchers": [["severity", "=", "warning"]],
+                               "continue": True, "group_by": ["alertname"]}]}}
+_, full = ga.notifications(FULL, resolve=False)
+# The root sends its own timings: without them an alert no child matches -- a missing or
+# misspelled severity -- is delivered on Grafana's defaults, a third behaviour nobody chose.
+assert (full["group_wait"], full["group_interval"], full["repeat_interval"]) == ("10s", "5m", "4h")
+kid = full["routes"][0]
+assert kid["continue"] is True and kid["group_by"] == ["alertname"]
+# A typo, a key that means nothing at the root, and mute timings -- which name objects this
+# script does not create, so Grafana would refuse the policy part-way through an apply.
+for where, bad in (("route", {**FULL, "policy": {**FULL["policy"], "routes": [
+                        {"receiver": "a", "matchers": [], "repeat_intervall": "1h"}]}}),
+                   ("route", {**FULL, "policy": {**FULL["policy"], "routes": [
+                        {"receiver": "a", "matchers": [], "mute_time_intervals": ["nights"]}]}}),
+                   ("root", {**FULL, "policy": {**FULL["policy"], "continue": True}})):
+    try:
+        ga.notifications(bad, resolve=False)
+    except ValueError as exc:
+        assert "unsupported" in str(exc), exc
+    else:
+        raise AssertionError(f"an unsupported key on the {where} must fail, not be dropped")
+
+for k in ga.ROUTE_TIMINGS:
+    assert real.get(k), f"notifications.yml: the root policy sets no {k} -- an alert with no " \
+                        "matching severity would be delivered on Grafana's defaults"
+
+# ── Every rule can be read in Discord, and reaches a route (#54) ─────────────────────────────
+# The template prints `summary`, `value` and `action` ("Do:"). A rule missing one renders a
+# blank, and an `action` that is a paragraph is the wall of text this replaced. The length is
+# of the text as written: a {{ $labels.x }} is about as long as what it becomes.
+ACTION_MAX = 120
+
+
+def routed_severities(routes):
+    return {m[2] for r in routes for m in r["object_matchers"] if m[0] == "severity" and m[1] == "="}
+
+
+# The booking job heartbeats each carry their own copy of the "is the logs allowance spent"
+# query (a Grafana rule cannot share one). A copy that drifts leaves one heartbeat blind or
+# noisy, with nothing in review looking wrong.
+jobs = [r for g in ga.load_yaml(HERE.parent / "grafana/rules/booking.yml")["groups"]
+        for r in g["rules"] if r["uid"].startswith("bk-job-")]
+gates = {d["model"]["expr"] for r in jobs for d in r["data"] if d["refId"] == "B"}
+assert jobs and len(gates) == 1, f"the bk-job rules' B queries differ: {sorted(gates)}"
+conditions = {d["model"]["expression"] for r in jobs for d in r["data"] if d["refId"] == "C"}
+assert len(conditions) == 1, f"the bk-job rules' conditions differ: {sorted(conditions)}"
+
+infra = routed_severities(real["routes"])
+per_app = {m[2]: routed_severities(r.get("routes") or [])
+           for r in real["routes"] for m in r["object_matchers"] if m[0] == "app"}
+for path in sorted((HERE.parent / "grafana" / "rules").glob("*.yml")):
+    for g in ga.load_yaml(path)["groups"]:
+        for r in g["rules"]:
+            notes = r.get("annotations") or {}
+            for key in ("summary", "value", "action"):
+                assert str(notes.get(key) or "").strip(), f"{r['uid']}: no `{key}` annotation"
+            assert len(notes["action"]) <= ACTION_MAX, (
+                f"{r['uid']}: `action` is {len(notes['action'])} characters -- the limit is "
+                f"{ACTION_MAX}: one line, the first thing to do; the rest belongs in the runbook")
+            labels = r.get("labels") or {}
+            sev, app = labels.get("severity"), labels.get("app")
+            assert sev, f"{r['uid']}: no severity label"
+            if app is not None:
+                assert app in per_app, f"{r['uid']}: app={app} has no route in notifications.yml"
+            known = per_app[app] if app is not None else infra
+            assert sev in known, (
+                f"{r['uid']}: severity={sev} has no route{f' under app={app}' if app else ''} "
+                f"(routed: {sorted(known)}) -- it would fall through to the root")
+
 print("grafana-apply.py: all checks passed")

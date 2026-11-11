@@ -103,6 +103,37 @@ the conclusion. Re-read it if a stack is added.
 > agents are refused. They were applied on 2026-10-25, with the month already spent, so both
 > fire until the 1st resets the counter.
 
+**The second time, and what closed it (#54, 2026-11-11).** The October fix turned off the wrong
+collector, so the same stream had used 40 of November's 50 GB by the 11th — 4.1 GB a day, two
+days from the cut-off. What is in place now, each of them independent of the others:
+
+| Guard | Where | What it does |
+|---|---|---|
+| Trim | `db-observability/config.alloy`, `loki.process "trim"` | cuts `querytext` to 1,000 characters; drops any line still over 8 KB; at most 3 lines/s per instance |
+| Slower collectors | same file | `query_details` every 5 min, `schema_details` every 10 min (defaults: 1 min) |
+| Container logs | `monitoring/config.alloy`, end of `loki.process "select"` | drops lines over 8 KB; at most 2 lines/s per container, burst 600 |
+| Forecast alert | `logs-pace` | fires when the last 24 h's growth, repeated to month end, passes 100% |
+| CI | `scripts/test_log_pipeline.sh` | runs the real trim in the pinned Alloy image; a pattern that stops matching fails the build |
+
+Measured after the fix, 2026-11-11, per day for both instances together:
+
+| Stream | Before | After |
+|---|---|---|
+| `op="query_association"` (query text) | 4.13 GB | ~31 MB |
+| `op="create_statement"` + `op="table_detection"` (schema) | ~39 MB | _not settled on the day: `create_statement` arrives in bursts of ~200 KB per instance that do not follow the interval. Between ~4 and ~39 MB — re-read after a full day_ |
+| `op="query_parsed_table_name"` | ~11 MB | ~11 MB |
+| Container logs, bpvps1 / bpvps2 | 1.7 MB / 0.6 MB | unchanged |
+| **Everything** | **~4.2 GB/day** | **0.05–0.08 GB/day ≈ 1.5–2.5 GB/month, under 5% of the allowance** (the first 20 minutes after deploy extrapolate to 0.08) |
+
+Agent cost of the trim, measured on bpvps2 with it live: `db-observability` 0.5% CPU, 62 MiB.
+Known cost of the slower collectors: a Grafana time range under 5 minutes may show a query
+without its text, and under 10 minutes no schema.
+
+> **Testing a log pipeline on a monitored host ships the test.** The audit's own prototype ran
+> the trim in a throwaway container on bpvps2 and `alloy` shipped its ~190 KB of output to Loki
+> like any other container's. Run such containers with `--log-driver none`, as
+> `scripts/test_log_pipeline.sh` does.
+
 The estimate above was ~242 for the two hosts; the hosts themselves came in at **282**, close
 enough. The rest of the 1,569 is Synthetic Monitoring and Grafana Cloud's own bookkeeping
 series, which the estimate did not attempt. `Active series over 80% of the ceiling` is
@@ -218,6 +249,17 @@ writes. Loki is the durable copy; rotation only drops the host-local tail. The b
 `app_stack`, so the caps take effect when booking-system's deploy next recreates the containers
 (or `docker compose up -d` by hand in `/root/stacks/booking-{staging,prod}`). Check with
 `docker inspect booking-be-staging --format '{{json .HostConfig.LogConfig}}'`.
+Since #54 the same cap is on `alloy` and `probes` on both hosts and on bpvps2's `traefik` and
+`backup` — before it, bpvps2's had no cap at all, and an agent logging one `429` per push for
+three weeks was free to fill the disk. (bpvps1's Docker daemon already defaulted to it.)
+
+**What is NOT shipped: too long, or too many (#54).** After the Traefik and `level` stages,
+`loki.process "select"` drops any line over 8 KB and limits each container to 2 lines a second
+with 600 saved up for a burst. Ordinary volume is ~2 MB a day for both hosts, so neither is near
+anything real; they exist so one container in an error loop cannot spend the shared 50 GB.
+Dropped lines are counted on the agent's own metrics, which are not shipped:
+`ssh bp-<host> 'curl -s 127.0.0.1:12345/metrics | grep -i dropped'`. A counter appears there
+only once something has been dropped.
 
 ## Database Observability (#166)
 
@@ -233,7 +275,7 @@ schema details — for **both booking Postgres instances**, from its own stack o
 | Collectors | `query_details`, `schema_details`, and the exporter's `stat_statements`, `database`, `stat_database`. **`query_details` runs every 5 minutes and its query text is cut to 1000 characters** (#54): at the defaults it shipped ~4–6 GB of Loki lines a day — ten bulk `INSERT`s of ~150 KB each, re-sent every minute — and spent the free tier's month of logs in nine days (see "Budget"). **`query_samples` is off since 2026-10-09**: it was blamed for that stream, wrongly, and stays off because its own volume has never been measured — the "query samples" view is the casualty. **`explain_plans` is off**: `EXPLAIN` needs `SELECT` on every table it plans. Grafana's alternative grant `pg_read_all_data` does **not** set `BYPASSRLS`, and booking-system's migration `0033` `FORCE`s row-level security on every `tenant_id` table — so it would read those back *empty*. What it would expose is what `0033` leaves outside RLS: the `tenants` / `tenant_settings` rows (each Tenant's identity, premises and branding copy) and any table with no `tenant_id`. That is the reason to refuse it |
 | Object grants skipped | Grafana's setup page also asks for `GRANT SELECT ON ALL TABLES` (or `pg_read_all_data`) "for detailed data". Skipped, and the schema tab still fills — but **only because Alloy v1.19.2's `schema_details` reads `pg_catalog`, never `information_schema`**. This is version-coupled: re-read that collector before the stack's `Dockerfile` tag moves |
 | Labels | `job="integrations/db-o11y"` (what Database Observability looks for), `instance` = `booking-staging` / `booking-prod`, `host` |
-| Budget | a keep-list in its `config.alloy` (`prometheus.relabel "keep"`). ~290 series per instance measured against a local Postgres; `stat_statements { limit = 100 }` bounds it near 540 each, **~1,100 for both**. Schema details are Loki lines, not series — small. Query samples were Loki lines too, and **6 GB a day of them**, which is why that collector is off |
+| Budget | **Three budgets, not one.** Series: a keep-list in its `config.alloy` (`prometheus.relabel "keep"`); ~290 per instance measured against a local Postgres, `stat_statements { limit = 100 }` bounds it near 540 each, **~1,100 for both**. Logs: `query_details` and `schema_details` write Loki lines, 50–80 MB a day after the trim (see "Budget" — untrimmed it was 4–6 GB a day). **Host-hours**: the product itself is metered at 2,232 a month included, which is **three instances**; two use 48 a day, ~64%. `dbo11y-hours-pace` alerts if a month is on pace to pass it |
 | Not collected | Postgres's own server log (the `logs` collector wants `log_line_prefix` changed and a file to tail; its container log already reaches Loki through `alloy`) |
 
 ### Turning it on — once, in this order
@@ -410,10 +452,21 @@ adding a rule**, and CI will say so.
 writing anything, `POST <GRAFANA_SM_URL>/api/v1/check/validate` with a check body answers
 `{"valid": true|false, "findings": […]}`.
 
-> ⚠️ **The first apply after a cadence change can page.** A rule matches `cadence="15m"` and no
-> series carries that label until each check has run once under the new config — up to fifteen
-> minutes, during which `noDataState: NoData` does exactly what it says. Run
-> `scripts/grafana-apply.py` in daylight and expect one NoData round.
+> **A gap in the results is not an outage (#54).** Both `endpoint-down-*` rules keep their last
+> state when the query returns nothing (`noDataState: KeepLast`). They used to say NoData, and
+> while Loki was refusing logs in October 2026 — the probe lost samples with them —
+> `endpoint-down-2m` flipped into NoData **1,178 times in eleven days**, each one a message that
+> read as a site being down. Silence is now one rule's job: `probe-results-stale` fires once, as
+> a warning, when no check has reported for half an hour. So the first apply after a cadence
+> change no longer pages: for up to fifteen minutes the rule for the new cadence matches
+> nothing, and says nothing.
+>
+> ⚠️ **The cost of KeepLast: an alert can outlive its check.** If a name is firing and you then
+> move *every* check off that cadence (or Synthetic Monitoring stops altogether), the rule's
+> query returns nothing and the alert stays firing, repeated every 4 hours, for a site that may
+> be fine. Clear it by deleting that rule from `grafana/rules/endpoints.yml` (the test will
+> demand it anyway when a cadence has no checks) and applying. And a site that goes down *during*
+> a gap is not seen until results return; `probe-results-stale` is what tells you there is a gap.
 
 **Who renews each certificate** — where to look when `tls-expiry` fires:
 
@@ -452,22 +505,26 @@ The policy is deliberately short: a handful of rules, each meaning one thing a p
 
 | Rule | Severity | Fires when |
 |---|---|---|
-| `container-down-<host>` | critical | a declared container has reported no metrics for 3 min, held 1 min |
-| `container-restarting` | critical | a container restarted more than twice in 15 min (Docker's restart policy) |
-| `disk-warning` / `disk-critical` | warning / critical | a real disk over 80% / 90%, held 5 min |
+| `container-down-<host>` | critical | a declared container has reported no metrics for 3 min, held 1 min — **and the host's own metrics are arriving** (#54): a dead agent or host is `metrics-stale-<host>`, once, not one message per container |
+| `container-restarting` | critical | a container restarted 3 or more times in 15 min (Docker's restart policy) |
+| `disk-warning` / `disk-critical` | warning / critical | a real disk at 80–95% / over 90%, held 5 min. Past 95% only the critical speaks; from 90 to 95 both do, on purpose — ranges that met exactly at 90 left a disk hovering there with no alert at all |
 | `memory-high` | warning | memory over 90%, held 15 min |
 | `postgres-connections` | warning | a Postgres over 80% of `max_connections`, held 5 min |
 | `mail-port-down` | critical | bpvps1's port 25, 465 or 993 failed two probes in a row from bpvps2 |
-| `endpoint-down-2m` / `endpoint-down-15m` | critical | the probe failed a public name two runs in a row — one rule per cadence, because the window has to be 2 × the interval + 1 min (#42) |
-| `tls-expiry` | warning | a served certificate has < 21 days left, held 10 min |
-| `backup-stale-<host>` | critical | a backup target's last success > 26 h old, or no heartbeat at all |
+| `endpoint-down-2m` / `endpoint-down-15m` | critical | the probe failed a public name two runs in a row — one rule per cadence, because the window has to be 2 × the interval + 1 min (#42). The `15m` rule also holds 2 min. Missing results keep the last state; they never alert here |
+| `probe-results-stale` | warning | no check at all has reported in 15 min, held 15 min: Synthetic Monitoring is blind. The one alert for missing probe data (#54) |
+| `tls-expiry` / `tls-expiry-critical` | warning / critical | a served certificate has 7–20 whole days left / under 7, held 10 min |
+| `backup-stale-<host>` / `backup-critical-<host>` | warning / critical | a backup target's last success is 26–50 h old (one night missed) / over 50 h (two). No heartbeat at all: warning after 15 min, critical after 50 h |
 | `tailscale-key-expiry` | warning | a node's `Self.KeyExpiry` is present |
 | `probes-stale-<host>` | warning | a textfile probe has not completed within its own max age, or no probe heartbeat at all |
 | `textfile-unreadable` | warning | a `*.prom` file cannot be parsed, held 5 min |
 | `series-budget` | warning | active series > 80% of the ceiling, held 1 h |
 | `logs-quota-budget` | warning | this month's logs ingested > 80% of the plan's included GB, held 15 min — or the usage figure cannot be read (infra#40) |
-| `logs-dropped` | critical | Loki refused logs for rate limiting at any point in the last 15 min — they are being thrown away now (infra#40) |
-| `metrics-stale-<host>` | critical | not one sample from that host's agent has reached Grafana Cloud in 5 min, held 4 min: about **10 min after it stops shipping**. A revoked or expired token, a dead agent, a dead host (infra#40) |
+| `logs-pace` | warning | the last 24 h's log growth, repeated to the end of the month, passes 100% of the allowance, held 30 min. The early warning: day one of a bleed, not two days before the cut-off (#54) |
+| `logs-dropped` | warning | Loki refused logs for rate limiting at any point in the last 15 min — they are being thrown away now (infra#40). A warning since #54: with the allowance spent nothing can be done until the 1st, so silence it until then |
+| `sm-executions-pace` | warning | Synthetic Monitoring executions on pace to pass 90% of the month's 100,000, held 1 h. At 100% every check stops (#54) |
+| `dbo11y-hours-pace` | warning | Database Observability host-hours on pace to pass the month's included 2,232 (three instances), held 1 h (#54) |
+| `metrics-stale-<host>` | critical | not one sample from that host's agent has reached Grafana Cloud in 3 min, held 2 min: about **5–6 min after it stops shipping** (was ~10 until #54 — it is now the only page for a dead host, so it cannot be the slow one). While it fires, `container-down-`, `probes-stale-` and `backup-*-<host>` stay quiet and those things are **unwatched**. A revoked or expired token, a dead agent, a dead host (infra#40) |
 | `metrics-received-zero` | critical | the account's metrics instance received no samples at all for 5 min, held 5 min. Grafana's side or the account; a backstop, **not** the token alarm (infra#40) |
 | `textfile-canary-stale` | info | only during the seam test |
 
@@ -476,9 +533,9 @@ channel (`grafana/rules/booking.yml`, from booking-system#166):
 
 | Rule | Severity | Fires when |
 |---|---|---|
-| `booking-error-rate` | warning | more than 20 `level=error` lines from a `booking-be` instance in 5 min |
+| `booking-error-rate` | warning | more than 20 `level=error` or `fatal` lines from a `booking-be` instance in 5 min, held 2 min |
 | `booking-stripe-webhook-failed` | critical | **any** `level=error` line with `webhook=stripe` in 5 min |
-| `bk-job-<job>-<stg\|prd>` | warning | no `cron job ok` line for that job in 25 h, held 15 min — four rules, two daily jobs × staging and prod |
+| `bk-job-<job>-<stg\|prd>` | warning | no `cron job ok` line for that job in 2 h, held 15 min, **and the month's logs allowance is not spent** (usage under 98% of it) — four rules, two jobs × staging and prod |
 
 **"API down" is not in that table**, and that is deliberate: `endpoint-down-2m` above already fires
 when the probe has failed `api.dev.reservetoday.app` or `api.reservetoday.app` twice in a row,
@@ -507,11 +564,33 @@ requires them for every monitored host, and every selector in them must carry th
 matcher.
 
 **How a rule's annotations are written.** `summary` names *what* is checked and nothing about
-its state (`Disk / on bpvps2`); `value` says what is wrong (`93% full`); `description` is the
-first action. Grafana re-renders annotations at the moment an alert resolves, so a summary
-written as "X is broken" arrives in Discord under ✅ RESOLVED still saying it is broken. The
-Discord template in `grafana/alerting/notifications.yml` prints `value` only under **Firing**.
+its state (`Disk / on bpvps2`); `value` says what is wrong (`93% full`); **`action` is the first
+thing to do, in 120 characters or fewer**, and is what Discord prints as "Do:" (#54);
+`description` is two lines of why it matters, shown in Grafana, and this runbook holds the
+rest. CI fails a rule missing any of the first three, or with a long `action`. Grafana
+re-renders annotations at the moment an alert resolves, so a summary written as "X is broken"
+arrives in Discord under ✅ RESOLVED still saying it is broken. The Discord template in
+`grafana/alerting/notifications.yml` prints `value` only under **Firing**.
 Why, with sources: `docs/research/grafana-discord-alert-format.md`.
+
+**How a message reads (#54).** One message is one host's incident at one severity:
+
+```
+🔴 CRITICAL · bpvps2 · 3 firing
+Firing
+• traefik on bpvps2: no metrics for 3 minutes · since 11 Nov 14:02
+> Do: `ssh bp-bpvps2 'docker ps -a'`, then `docker logs --tail 50 <name>` for the one that is gone
+• backup on bpvps2: no metrics for 3 minutes · since 11 Nov 14:02
+• Disk / on bpvps2: 93% full · since 11 Nov 14:02
+> Do: `ssh bp-bpvps2 'df -h; docker system df'` and see what grew: images, logs or a volume
+Runbook · Silence all
+```
+
+🔴 critical, 🟠 warning, 🔵 info. (Discord draws the card's side bar red whenever anything in
+it is firing, whatever the severity; the dot is the one to read.) The title is the rule's name
+when every alert in the message comes from one rule, otherwise the host. A line reading
+**no data** or **query error** means the *check* could not be evaluated — not that the thing it
+watches is down. A critical still firing is repeated every 4 hours, a warning once a day.
 
 `container-down-<host>` **names every container** on the host. A rule over all containers at once
 cannot work: a stopped container's series just stops, and Grafana treats a vanished series as
@@ -520,10 +599,11 @@ The monitoring stack's own containers are exempt — an agent cannot report its 
 
 ### Rules we did not write: Grafana Asserts (#43)
 
-The stack carries **642** alert and recording rules. **28 of them are ours** — `Monitoring`
-(18) and `Apps` (10), the two tables above. Every other one is generated by Grafana Cloud's
-**Asserts** app (`grafana-asserts-app`, shown in the UI as "Knowledge graph"), which writes
-~600 rules into the `knowledge-graph` folder and ~14 into `frontend-observability-asserts`.
+The stack carries **664** alert and recording rules (counted 2026-11-11). **37 of them are
+ours** — `Monitoring` (31) and `Apps` (6), the two tables above. Every other one is generated by
+Grafana Cloud's **Asserts** app (`grafana-asserts-app`, shown in the UI as "Knowledge graph"),
+which writes 613 rules into the `knowledge-graph` folder and 14 into
+`frontend-observability-asserts`.
 `grafana-apply.py` neither created them nor can reconcile them, and nothing in this repository
 reads them: our only two dashboards are `Monitoring/Endpoints` and `Monitoring/Hosts`, and no
 rule, dashboard or script here references Asserts.
@@ -567,8 +647,22 @@ Grafana Cloud portal (Administration → Plugins, or grafana.com → the stack �
 the delete to buy time, and do not silence it open-endedly — a silence with no expiry is the
 same permanent-red-line problem wearing a different hat.
 
-**How to check the list is still clean.** `firing: NONE` is the whole test — and it is the one
-assertion that makes "something is red" mean something again:
+> ⚠️ **It did come back: `asserts_up` has been firing again since 2026-10-08** (found by the #54
+> audit, still firing on 2026-11-11). It reaches no human — see the next paragraph — so it is
+> noise in the rule list rather than in Discord, but the check below prints it, and will until
+> the plugin is uninstalled in the portal or the group is deleted again.
+
+**The plugin's frontend alerts reach nobody, and that is the decision (#54).** The 14 rules in
+`frontend-observability-asserts` (`Frontend*Breach` and friends) fired 19 times between
+2026-10-21 and 11-11. Every plugin-generated rule routes to the plugin's own contact point,
+`grafana-insight-processor` — a webhook back into Asserts — and none carries our `severity`
+routing to Discord. They are **knowingly ignored**: nobody tuned their thresholds, they cannot
+be edited from this repository, and booking's frontends already have checks we did write
+(`off_platform:` under "External checks"). If frontend performance alerts are ever wanted, they
+are written here as our own rules with `app: booking`, not adopted from the plugin.
+
+**How to check the list is still clean.** Nothing firing but `asserts_up` (see above) and
+whatever you already know about is the whole test:
 
 ```bash
 curl -s -H "Authorization: Bearer $GRAFANA_SA_TOKEN" \
@@ -585,8 +679,19 @@ Two Discord channels, one routing tree. The rule's **`app` label** decides, and 
 | no `app` label | `discord` | it is infrastructure — a host, a container, a certificate |
 | `app: booking` | `discord-booking` | booking-system's own alerts, in their own room |
 
-Severity only sets the pace (10s / 1m / 5m group wait), never the destination — both channels run
-the same three tiers, written once in `grafana/alerting/notifications.yml` and merged into both.
+Severity only sets the pace, never the destination — both channels run the same three tiers,
+written once in `grafana/alerting/notifications.yml` and merged into both:
+
+| Severity | First message after | A changed group is re-sent after | Still firing: repeated every |
+|---|---|---|---|
+| `critical` | 10 s | 5 min | 4 h |
+| `warning` | 1 min | 10 min | 24 h |
+| `info` | 5 min | 30 min | 24 h |
+
+Alerts are grouped by **folder and host** (#54), so one host's incident is one message that
+updates as alerts join or clear. An alert with no severity, or a misspelled one, matches no tier
+and is delivered by the root on the `critical` timings; CI fails a rule whose severity has no
+route, so that is a safety net rather than a path.
 
 **The label is the contract, not the folder.** A booking rule filed in the `Apps` folder but
 missing `app: booking` is not silent — it arrives in the infra channel, which is the wrong room
@@ -626,10 +731,10 @@ app = a webhook, a contact point, a route, a label".
 Replace `<host>` with the alert's `host` label. Every alert names it.
 
 **`container-down-<host>`** — a container is gone: stopped, removed, or crash-looping too fast to
-report.
-1. **Is it every container on the host at once?** Then it is the agent or the host, not N
-   outages: `ssh bp-<host> 'docker ps; docker logs --tail 50 alloy'`. No SSH at all → the host or
-   the tailnet (Hostinger console).
+report. It only fires while the host's own metrics are arriving, so it is never "the agent died".
+1. **Is it every container on the host at once?** Then Docker itself restarted or the host
+   rebooted: `ssh bp-<host> 'uptime; docker ps -a'`. (A dead agent or an unreachable host is
+   `metrics-stale-<host>` instead, and this rule stays quiet.)
 2. `ssh bp-<host> 'docker ps -a --filter name=<container>; docker logs --tail 100 <container>'`.
 3. A deploy in progress? `docker compose up` recreates containers; a few minutes of absence during
    a deploy fires this. Silence deploys you plan.
@@ -674,14 +779,30 @@ the `15m` rule.
 2. One name: its container (`container-down` alongside?), its router rule, its DNS record.
 3. `curl -sv https://<name>/ -o /dev/null` from anywhere but the host.
 
-**`tls-expiry`** — a certificate has not renewed in over a week of trying.
+**`probe-results-stale`** — no Synthetic Monitoring check has reported for half an hour. No site
+is known to be down; the monitor is blind, and every `endpoint-down-*` and `tls-expiry*` alert
+with it (they keep their last state meanwhile).
+1. Grafana → **Testing & synthetics → Checks**: are the checks enabled and running?
+2. Is `logs-dropped` firing? When Loki refuses logs the probe loses samples too (October 2026).
+   `sm-executions-pace` at 100% stops every check until the 1st.
+3. status.grafana.com, region `prod-ap-southeast-1`; the Singapore probe is the only one we use.
+
+**`tls-expiry` / `tls-expiry-critical`** — a certificate has not renewed in over a week of
+trying (warning, 7–20 days left), or has under 7 days left (critical).
 1. Which renewer owns the name: the table under "External checks".
 2. acme.sh names: `vps/bpvps1/stacks/stalwart/README.md`. `le-tls` names: `docker logs traefik | grep -i acme`
    on that host; the record must be DNS-only.
 3. `echo | openssl s_client -servername <name> -connect <name>:443 2>/dev/null | openssl x509 -noout -enddate`.
+4. **`le-tls` renewal failing with a challenge error for a name you retired?** Traefik renews
+   the whole stored certificate, every name on it, and one name that now points elsewhere fails
+   all of them. That was `api.dev.reservetoday.app` in November 2026: its stored certificate
+   still carried `api.staging.reservetoday.app`, which had moved to Vercel. Fix, on that host:
+   back up `acme-tls.json` in the `traefik-letsencrypt` volume, delete the certificate entries
+   that carry the retired name, restart Traefik (~20 s of routing), and confirm the new
+   certificate's names with the `openssl` line above plus `-ext subjectAltName`.
 
-**`backup-stale-<host>`** — a backup target has not succeeded for a night. Runbook:
-[`backup-restore.md`](backup-restore.md).
+**`backup-stale-<host>` / `backup-critical-<host>`** — a backup target has not succeeded for a
+night (warning), or for two (critical). Runbook: [`backup-restore.md`](backup-restore.md).
 1. `ssh bp-<host> 'docker logs --tail 100 backup'`.
 2. `docker exec backup /app/bin/backup.sh` runs it now, with output.
 3. No target label at all: `backup.prom` is gone or the agent cannot read it — `textfile-unreadable`
@@ -701,6 +822,11 @@ says which (`docker` → `container-restarting`, `postgres` → `postgres-connec
 2. Run it by hand: `docker exec probes /app/bin/probe.sh <probe>`; the exit status and message are the answer.
 3. `probe=mail` on bpvps1: someone set `MAIL_PROBE_TARGET` there. It refuses by design; unset it.
    No `probe` label at all: the `probes` container is gone.
+> **`probe=tailscale` after a Tailscale update was a false alarm for nine days** (2026-11-02 to
+> 11-11, both hosts). The container mounted `/run/tailscale`, which systemd deletes and recreates
+> when `tailscaled` restarts, so it kept looking at the deleted directory. It now mounts the
+> host's `/run` at `/host-run` instead (#54). If "tailscaled LocalAPI did not answer" ever
+> returns: `docker exec probes ls -l /host-run/tailscale/`.
 
 **`textfile-unreadable`** — a `*.prom` file is malformed, so that producer's metrics stopped.
 1. `ssh bp-<host> 'docker logs --tail 50 alloy'` names the file.
@@ -710,7 +836,32 @@ says which (`docker` → `container-restarting`, `postgres` → `postgres-connec
 **`series-budget`** — something new is expensive.
 1. Explore → `grafanacloud-prom`: `topk(10, count by (__name__) ({__name__=~".+"}))`.
 2. The last change to a `metrics.allowlist`, or a new container on several networks.
-3. The Synthetic Monitoring checks count too: 11 names × 3 probes, plus 4 off-platform × 1.
+3. The Synthetic Monitoring checks count too: 11 names × 1 probe since #42.
+
+**`logs-pace`** — at the last 24 hours' rate, this month's logs pass the allowance before the
+1st. This is the early one: it fires on the first day of a bleed, while there is still a month
+to save. It stays on for up to 24 hours after the fix, because the window still holds the bleed.
+1. Which stream? Explore → `grafanacloud-logs`:
+   `sum by (host, container, op) (bytes_over_time({host=~".+"}[1h]))`. A row with no `container`
+   is Database Observability; its `op` says which collector.
+2. Cut it at the source the same day: the collector's interval or switch in
+   `db-observability/config.alloy`, or a `stage.drop` in `monitoring/config.alloy`. Stopping the
+   `db-observability` container is a safe, reversible stopgap.
+3. Did a guard stop working? `bash scripts/test_log_pipeline.sh`, and "Budget" above for what
+   each stream should measure.
+
+**`sm-executions-pace`** — Synthetic Monitoring is on pace to use over 90% of the month's
+100,000 executions. At 100% every check stops until the 1st, and every endpoint and certificate
+alert goes blind.
+1. What changed? `git log -p grafana/synthetic/endpoints.yml` — a new name, a faster cadence, a
+   second probe. The arithmetic is at the top of that file.
+2. Slow a check or drop one there, then `python scripts/grafana-apply.py`.
+3. Portal → Usage, for Grafana's own count.
+
+**`dbo11y-hours-pace`** — Database Observability is on pace to pass its included host-hours
+(2,232 a month: three instances). Two booking Postgres instances use about 64%.
+1. Explore → `grafanacloud-usage` → `grafanacloud_instance_active_dbo11y_instance_count`.
+2. More than three: take one out of `vps/bpvps2/stacks/db-observability/config.alloy`.
 
 **`logs-quota-budget`** — this month's logs are over 80% of the plan's allowance (50 GB on the
 free tier), so at the wrong stream's pace the rest of the month's logs are a day or two from being
@@ -732,7 +883,12 @@ or on Loki.)
 
 **`logs-dropped`** — Loki is refusing log pushes right now. The lines are gone, not delayed, and
 every log-based alert (`booking.yml`: `booking-error-rate`, the Stripe-webhook rule, the cron
-heartbeats) reads a stream with holes or nothing in it. Metric-based alerts are unaffected. Fires on
+heartbeats) reads a stream with holes or nothing in it. Once the allowance is spent the cron
+heartbeats (`bk-job-*`) stay quiet on purpose — one cause, one alert — so **this alert firing
+with usage at 100% means they are blind, not healthy**. (A short burst under 100% does not
+stand them down.) Metric-based alerts are unaffected. A warning, not a critical: once
+the allowance is spent there is nothing to do until the 1st, and the right response is a silence
+that ends then. Fires on
 `grafanacloud_logs_instance_discarded_bytes_per_second{reason="rate_limited"}` at any value over
 the last 15 minutes, so it resolves about 15 minutes after the last drop. `greater_than_max_sample_age`
 is not counted: a first deploy replays old logs and Loki refuses the oldest, once, with no loss.
@@ -752,10 +908,14 @@ five minutes, so every metric-based alert for the host is blind. This is the ale
 on 2026-09-20, when the agents' token was revoked and three and a half hours went by in silence
 (infra#40). Grafana evaluates it against what Grafana has received, so it needs nothing from the
 agent, the token or the host. It counts `node_memory_MemTotal_bytes{host="<host>"}` samples over
-5 minutes (5 when healthy) and fires at 0, held 4 minutes; `or vector(0)` and `noDataState:
+3 minutes (3 when healthy) and fires at 0, held 2 minutes; `or vector(0)` and `noDataState:
 Alerting` mean an empty answer is a failure too, never health. It resolves on the first sample
-back, a minute or two after the agent ships again. `container-down-<host>` firing for every
-container on the host at the same moment is the same fact seen from another rule.
+back, a minute or two after the agent ships again. `container-down-<host>` stays quiet while
+this fires (#54), and so do `probes-stale-<host>` and `backup-stale-` / `backup-critical-<host>`:
+each requires the host's metrics to be arriving, so a dead agent is this one alert and not a
+dozen — and containers, probes and backup heartbeats are **unwatched** until it resolves. A
+`container-down` that was already firing when the agent died will say RESOLVED at that moment;
+read it as "no longer known", not as "back".
 1. **Both hosts at once?** Then it is the one thing they share: the `GRAFANA_CLOUD_API_TOKEN`
    (revoked, expired, or rotated without recreating the agents) or Grafana Cloud.
    `ssh bp-<host> 'docker logs --tail 20 alloy'`: `status=401 ... invalid token` is the token, so
@@ -811,7 +971,8 @@ change may be missing. Any single line fires this.
    rule — if signatures are being refused, the endpoint secret is wrong, not the handler.
 
 **`bk-job-<job>-<stg|prd>`** — the backend's cron scheduler has not written a `cron job ok`
-line for that job in 25 hours. The rule's title names the job and the instance.
+line for that job in 2 hours (it writes one every 15 minutes), and the logs allowance is not
+spent. The rule's title names the job and the instance.
 1. Is the container even up? `ssh bp-bpvps2 'docker ps --filter name=booking-be-<env>; docker logs
    --tail 100 booking-be-<env> | grep -i cron'`. A crash-loop shows up as `container-restarting`
    in the infra channel at the same time.
@@ -824,8 +985,9 @@ line for that job in 25 hours. The rule's title names the job and the instance.
 > **What this rule does and does not prove.** The two daily jobs are registered on a shared
 > 15-minute slot grid (`be/src/jobs/local-time.ts`), and each tick logs `cron job ok` whether or
 > not any Tenant's local hour was due — the per-Tenant work is decided inside the run. So this is
-> a **heartbeat that the scheduler is alive**, roughly 96 lines a day per job, and 25 hours of
-> silence means the scheduler stopped. It is **not** evidence that a given Tenant's daily run
+> a **heartbeat that the scheduler is alive**, 96 lines a day per job (measured 2026-11-11), and
+> 2 hours of silence — eight missed ticks — means the scheduler stopped. The window was 25 hours
+> until #54, on the belief that the line was daily. It is **not** evidence that a given Tenant's daily run
 > happened: a job whose per-Tenant pass is quietly doing nothing keeps this rule green. Proving
 > that belongs in the application's own checks, not here.
 
@@ -839,8 +1001,9 @@ wrong, write it down (date, rule, why it was not real) in the issue tracker. On 
 change the threshold, the `for`, or the query — or delete the rule — in a commit that says which
 false alarms it answers. "Leave it and see" is not an option; a silence is not a tune.
 
-Contact points (email + phone push) are set in the Grafana Cloud console against the operator's
-own addresses. **No address is committed here** — this repository is public.
+Delivery is **Discord only**: two contact points, `discord` and `discord-booking`, and no email
+contact point exists (checked against the account, 2026-11-11). Phone push is the Discord app's
+own notification. **No webhook or address is committed here** — this repository is public.
 
 ## Operating it
 
@@ -877,6 +1040,10 @@ own addresses. **No address is committed here** — this repository is public.
    severity tiers: `critical` → 10s group wait (the `endpoint-down-*` timing in
    `grafana/rules/endpoints.yml` needs it), `warning` → 1m, `info` → 5m and a day between
    repeats, because `info` is the textfile canary and it is *meant* to fire during the seam test.
+   Repeats and grouping changed in #54: "Where an alert lands" has the table. Both channels
+   were sent a test message with the current template on 2026-11-11 and both delivered; the
+   infra one was read in Discord. **Still to be looked at by a person: the booking channel's
+   copy, and what the phone's lock screen shows for an embed.**
 
    > ⚠️ **Discord will not reliably wake anyone at 2am** — phone Do Not Disturb silences it.
    > Set that server to "All Messages" and add it to the DND exceptions, or accept that an
@@ -903,6 +1070,24 @@ Grafana Cloud → **Alerts & IRM → Alerting → Silences → New silence**, ma
 (and `container=<name>` to narrow it), with an end time. `mail-port-down` carries `host=bpvps1` —
 the mail host, not the prober — so a bpvps1 silence covers it. Never pause the rule itself — a
 paused rule is easy to forget; a silence expires.
+
+### Silencing something you know about and cannot fix yet
+
+**Acknowledged, and it has to wait until a date = a silence that ends on that date** (#54). The
+logs allowance is spent until the 1st; a certificate is waiting on someone else's DNS change; a
+part is on order. Do not leave it repeating and do not mute the channel — the first trains you
+to ignore the room, the second hides the next real thing.
+
+- **"Silence all"** at the bottom of a Discord message opens the silence form already filled in
+  with that message's folder, host and severity (and its rule, when the message is about one
+  rule). Read the matchers before saving: a message about several rules gives a silence that
+  covers *every* alert of that severity on that host, including ones that have not fired yet.
+  Narrow it with `alertname=` if that is not what you mean. A message with no host and more
+  than one rule in it (the account-wide budget alerts) offers **"Silence the first"** instead,
+  Grafana's own one-alert link: a group silence there would have covered both hosts.
+- **Always set the end**, to the date the thing can be fixed or will fix itself, and write the
+  reason in the comment. A silence with no end is the permanent red line again, wearing a hat.
+- When it expires and the alert is still firing, it speaks again. That is the point.
 
 ### Rotating `GRAFANA_CLOUD_API_TOKEN`
 

@@ -22,6 +22,14 @@
 #   grafanacloud_org_logs_included_usage             GB the plan includes (50 on the free tier)
 #   grafanacloud_logs_instance_discarded_bytes_per_second{reason="rate_limited"}
 #                                                    bytes/s Loki refused, by reason
+#   grafanacloud_org_sm_billable_check_executions / ..._sm_included_check_executions
+#                                                    synthetic check runs this month / included
+#   grafanacloud_org_db_o11y_billable_host_hours / ..._db_o11y_included_host_hours
+#                                                    Database Observability hours / included
+#
+# Three of the rules are FORECASTS (#54): logs-pace, sm-executions-pace, dbo11y-hours-pace.
+# The second logs incident, November 2026, was 80% used with two days left before anyone was
+# told. A forecast says so on day one. The arithmetic is above logs-pace.
 #
 # ── No data ──────────────────────────────────────────────────────────────────────────────────
 # The two logs rules answer No Data differently, on purpose.
@@ -45,16 +53,19 @@
 #
 # metrics-stale-<host>: a HEARTBEAT, not absent_over_time. node_memory_MemTotal_bytes is one
 # series per host, scraped every 60 s by the host exporter inside `alloy`, allowlisted, and there
-# whatever containers run, so a healthy host has 5 samples in any 5 minutes (the 7 days to
-# 2026-10-25: never fewer, on either host). `sum(...)` drops every label and `or vector(0)` turns
+# whatever containers run, so a healthy host has 3 samples in any 3 minutes (the 7 days to
+# 2026-11-11: never fewer, on either host). `sum(...)` drops every label and `or vector(0)` turns
 # "no series" into an explicit 0, so healthy and broken are the SAME labelless instance and the
 # alert moves Normal -> Pending -> Alerting on it. A `by (host)` query would not: the healthy
 # instance would vanish (Grafana reads that as resolved) and the zero would have no host to name.
 # The host is named by the static `host` label instead. noDataState is `Alerting` on top: the
 # query cannot return nothing any more, so No Data can only mean the datasource failed to answer,
 # and then nothing about the host can be trusted either. Silence is never read as health here.
-#   Timing: the count reaches 0 five minutes after the last sample, `for: 4m` holds it, so
-#   Alerting 9-10 minutes after the agent stopped shipping. It resolves on the first sample back.
+#   Timing: the count reaches 0 three minutes after the last sample, `for: 2m` holds it, so
+#   Alerting 5-6 minutes after the agent stopped shipping. It resolves on the first sample back.
+#   It was 5m + 4m until #54. That was affordable while container-down-<host> also fired for
+#   every container about 4 minutes in; container-down now stays quiet when the host's metrics
+#   stop (containers.yml), so THIS is the page for a dead host and it must not be the slow one.
 #   One per host, like container-down- and probes-stale-: CI (vps/shared/check-monitoring.py)
 #   requires a metrics-stale-<host> for every monitored host, its selector pinned to that host.
 #   It watches `alloy`, not bpvps2's db-observability, which shares the token: a revoked token
@@ -117,16 +128,64 @@ groups:
         annotations:
           summary: "Grafana Cloud logs allowance this month"
           # `with` because a No Data instance has no A to print.
-          value: "{{ with $values.A }}{{ humanize $values.A.Value }}% of the month's included logs used{{ else }}the usage figure cannot be read{{ end }}"
+          value: '{{ with $values.A }}{{ printf "%.0f" $values.A.Value }}% of the month''s included logs used{{ else }}the usage figure cannot be read{{ end }}'
+          action: 'Explore -> grafanacloud-logs: `sum by (host, container, op) (bytes_over_time({host=~".+"}[1h]))`, stop the top one'
           description: >-
             At 100% Loki refuses every push from both hosts until the 1st (UTC), and every
-            log-based alert goes blind. Find what grew: Explore -> grafanacloud-logs,
-            `sum by (host, container) (bytes_over_time({host=~".+"}[1d]))` on a day before it
-            filled; then `grafanacloud-usage` ->
-            `grafanacloud_logs_instance_bytes_received_per_second`. A new or noisier stream is
-            the usual cause (the 2026-10-09 one was query_samples, 6 GB/day). If the figure cannot
-            be read, check grafanacloud-usage in Connections -> Data sources. Runbook:
-            docs/monitoring.md.
+            log-based alert goes blind. Both 2026 incidents were Database Observability's
+            query_details collector (docs/monitoring.md, "Budget").
+
+      # The FORECAST (#54). The rule above speaks at 80% used, which in November 2026 was two
+      # days before the cut-off; this one speaks on the first day of a bleed. It adds the last
+      # 24 hours' growth, repeated for every day left in the month, to what is already used,
+      # and fires when that passes 100% of the allowance -- "at this pace the logs run out
+      # before the 1st". Over 100, not 80: a month that will END at 85% is the rule above's to
+      # report, once, when it gets there.
+      #
+      # The billing month is the calendar month in UTC, which is what day_of_month() and
+      # hour() count in. On the 1st, `offset 1d` reads last month's closing figure, the
+      # difference is negative and clamp_min makes it 0 -- so the forecast is quiet for the
+      # first 24 hours of a month and then real. After a fix it takes up to 24 hours to clear,
+      # because the window still holds the bleed. Ordinary growth is ~0.1 GB a day.
+      - uid: logs-pace
+        title: Logs on pace to run out this month
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 90000, to: 0}
+            datasourceUid: grafanacloud-usage
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                100 * (
+                  max(grafanacloud_org_logs_usage)
+                  + clamp_min(max(grafanacloud_org_logs_usage) - max(grafanacloud_org_logs_usage offset 1d), 0)
+                    * (days_in_month() - day_of_month() + 1 - hour() / 24)
+                ) / max(grafanacloud_org_logs_included_usage)
+          - refId: C
+            relativeTimeRange: {from: 90000, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [100]}
+        # The usage figure vanishing is logs-quota-budget's to report -- same datasource.
+        noDataState: OK
+        execErrState: Error
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Grafana Cloud logs allowance, at the last 24 hours' pace"
+          value: '{{ printf "%.0f" $values.A.Value }}% of the month''s allowance by the 1st'
+          action: 'Explore -> grafanacloud-logs: `sum by (host, container, op) (bytes_over_time({host=~".+"}[1h]))`, stop the top one'
+          description: >-
+            Something is sending far more than usual. If nothing changes, Loki starts refusing
+            every push before the month ends. Stays on for up to 24 hours after the fix.
 
       # The consequence, not the forecast: this fires when bytes are ACTUALLY being thrown away.
       # `reason="rate_limited"` is the 429 -- the zero-byte limit after the allowance is spent,
@@ -136,6 +195,10 @@ groups:
       # alert flap closed; the cost is that it resolves ~15 minutes after the last drop.
       # `greater_than_max_sample_age` is deliberately not counted: a first deploy replays old
       # logs and Loki refuses the oldest (docs/monitoring.md, "Budget") -- once, and no loss.
+      #
+      # A WARNING since #54. With the allowance spent there is nothing to do until the 1st, and
+      # as a critical this repeated hourly ~165 times in October 2026. The actionable alert is
+      # logs-pace above, days earlier. The right response here is a silence that ends on the 1st.
       - uid: logs-dropped
         title: Loki is refusing log pushes
         condition: C
@@ -161,17 +224,14 @@ groups:
         execErrState: Error
         for: 0s
         labels:
-          severity: critical
+          severity: warning
         annotations:
           summary: "Grafana Cloud logs ingestion"
           value: "refused up to {{ humanize $values.A.Value }} bytes/s of logs in the last 15 minutes"
+          action: "Allowance at 100%: silence this until the 1st (UTC). Under 100%: a burst, find the stream that spiked"
           description: >-
-            Logs are being dropped right now, so log-based alerts (booking.yml) are blind and the
-            lines are gone for good. Usage at or over 100% -> the allowance is spent and nothing
-            ships until the 1st (UTC); stop the stream that filled it. Usage under 100% -> a
-            burst over the per-second limit: look at `grafanacloud_logs_instance_bytes_received_per_second`.
-            Agents logging `429` is the same fact from the host side:
-            `ssh bp-<host> 'docker logs --tail 20 alloy'`. Runbook: docs/monitoring.md.
+            Logs are being dropped right now, so log-based alerts are blind and the lines are
+            gone for good. The booking job heartbeats stay quiet on purpose while this fires.
 
       # ── Metrics arriving. One heartbeat per host, then the account-wide backstop. ─────────
       - uid: metrics-stale-bpvps1
@@ -185,7 +245,7 @@ groups:
               refId: A
               instant: true
               range: false
-              expr: sum(count_over_time(node_memory_MemTotal_bytes{host="bpvps1"}[5m])) or vector(0)
+              expr: sum(count_over_time(node_memory_MemTotal_bytes{host="bpvps1"}[3m])) or vector(0)
           - refId: C
             relativeTimeRange: {from: 600, to: 0}
             datasourceUid: __expr__
@@ -197,21 +257,17 @@ groups:
                 - evaluator: {type: lt, params: [1]}
         noDataState: Alerting
         execErrState: Error
-        for: 4m
+        for: 2m
         labels:
           severity: critical
           host: bpvps1
         annotations:
           summary: "Metrics from bpvps1 reaching Grafana Cloud"
-          value: "{{ with $values.A }}{{ humanize $values.A.Value }} samples in the last 5 minutes, 5 expected{{ else }}the query returned nothing{{ end }}"
+          value: "{{ with $values.A }}{{ humanize $values.A.Value }} samples in the last 3 minutes, 3 expected{{ else }}the query returned nothing{{ end }}"
+          action: "`ssh bp-bpvps1 'docker ps -a --filter name=alloy; docker logs --tail 20 alloy'`. No SSH: the host is down"
           description: >-
-            Nothing from bpvps1's agent has reached Grafana Cloud for over 5 minutes, so every
-            metric-based alert for the host is blind. Both hosts at once: the shared
-            GRAFANA_CLOUD_API_TOKEN (revoked or expired) or Grafana Cloud. `ssh bp-bpvps1
-            'docker logs --tail 20 alloy'`; `status=401 ... invalid token` is the token, see
-            "Rotating GRAFANA_CLOUD_API_TOKEN" in docs/monitoring.md. This host alone: its agent
-            or the host, `docker ps -a --filter name=alloy`; no SSH at all means the host.
-            container-down for every container on the host at once is the same fact.
+            Every metric-based alert for bpvps1 is blind, its containers included. Both hosts at
+            once, or `401 invalid token` in the log: the shared GRAFANA_CLOUD_API_TOKEN.
 
       - uid: metrics-stale-bpvps2
         title: No metrics arriving from bpvps2
@@ -224,7 +280,7 @@ groups:
               refId: A
               instant: true
               range: false
-              expr: sum(count_over_time(node_memory_MemTotal_bytes{host="bpvps2"}[5m])) or vector(0)
+              expr: sum(count_over_time(node_memory_MemTotal_bytes{host="bpvps2"}[3m])) or vector(0)
           - refId: C
             relativeTimeRange: {from: 600, to: 0}
             datasourceUid: __expr__
@@ -236,22 +292,18 @@ groups:
                 - evaluator: {type: lt, params: [1]}
         noDataState: Alerting
         execErrState: Error
-        for: 4m
+        for: 2m
         labels:
           severity: critical
           host: bpvps2
         annotations:
           summary: "Metrics from bpvps2 reaching Grafana Cloud"
-          value: "{{ with $values.A }}{{ humanize $values.A.Value }} samples in the last 5 minutes, 5 expected{{ else }}the query returned nothing{{ end }}"
+          value: "{{ with $values.A }}{{ humanize $values.A.Value }} samples in the last 3 minutes, 3 expected{{ else }}the query returned nothing{{ end }}"
+          action: "`ssh bp-bpvps2 'docker ps -a --filter name=alloy; docker logs --tail 20 alloy'`. No SSH: the host is down"
           description: >-
-            Nothing from bpvps2's agent has reached Grafana Cloud for over 5 minutes, so every
-            metric-based alert for the host is blind, booking's Postgres and containers included.
-            Both hosts at once: the shared GRAFANA_CLOUD_API_TOKEN (revoked or expired) or
-            Grafana Cloud. `ssh bp-bpvps2 'docker logs --tail 20 alloy'`; `status=401 ... invalid
-            token` is the token, see "Rotating GRAFANA_CLOUD_API_TOKEN" in docs/monitoring.md
-            (db-observability on this host uses it too). This host alone: its agent or the host,
-            `docker ps -a --filter name=alloy`; no SSH at all means the host. container-down for
-            every container on the host at once is the same fact.
+            Every metric-based alert for bpvps2 is blind, booking's containers and Postgres
+            included. Both hosts at once, or `401 invalid token` in the log: the shared
+            GRAFANA_CLOUD_API_TOKEN.
 
       # Zero, read as under 0.01/s: a per-second rate is a float, and anything under one sample a
       # minute in every minute of the window is nothing arriving. Healthy is ~20-30/s, and the
@@ -286,10 +338,102 @@ groups:
         annotations:
           summary: "Samples received by the Grafana Cloud metrics instance"
           value: "{{ with $values.A }}at most {{ humanize $values.A.Value }} samples/s in the last 5 minutes{{ else }}the received-samples figure cannot be read{{ end }}"
+          action: "Check status.grafana.com, then the Grafana Cloud portal's billing and usage page"
           description: >-
-            The account's metrics instance is receiving nothing at all: not from either agent,
-            and not from Synthetic Monitoring, which publishes with its own credential. That is
-            Grafana Cloud's side or the account (status.grafana.com; the portal's billing and
-            usage pages), not one host. metrics-stale-<host> firing on both hosts at the same
-            time is the expected companion. If the figure cannot be read: Connections -> Data
-            sources -> grafanacloud-usage -> Test. Runbook: docs/monitoring.md.
+            Nothing arrives at all: not from either agent, not from Synthetic Monitoring. That is
+            Grafana Cloud or the account, not one host.
+
+      # ── Budgets: the other two metered products we use (#54) ──────────────────────────────
+      # Same forecast as logs-pace, same datasource, same reason it is safe: the usage figures
+      # are written by Grafana about the account and do not stop when an agent is refused.
+      # One rule each, on the forecast only -- it can never be below what is already used, so
+      # "on pace to pass 90%" also covers "already past 90%".
+      #
+      # Synthetic Monitoring: 100,000 check executions a month on the free tier, and at 100%
+      # EVERY check stops -- all endpoint and certificate alerts at once. Eleven checks use
+      # ~68% (2,264 a day, measured 2026-11-11; the arithmetic is grafana/synthetic/
+      # endpoints.yml). One more 2-minute check would pass it. 90, not 100: there is no slack
+      # to wait for, and the only fix is a slower or a removed check.
+      - uid: sm-executions-pace
+        title: Synthetic checks on pace to run out this month
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 90000, to: 0}
+            datasourceUid: grafanacloud-usage
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                100 * (
+                  max(grafanacloud_org_sm_billable_check_executions)
+                  + clamp_min(max(grafanacloud_org_sm_billable_check_executions) - max(grafanacloud_org_sm_billable_check_executions offset 1d), 0)
+                    * (days_in_month() - day_of_month() + 1 - hour() / 24)
+                ) / max(grafanacloud_org_sm_included_check_executions)
+          - refId: C
+            relativeTimeRange: {from: 90000, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [90]}
+        # Alerting, unlike logs-pace: no other rule reads this figure, so if Grafana renames
+        # the metric an OK here would leave the budget unwatched and nobody told.
+        noDataState: Alerting
+        execErrState: Error
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Synthetic Monitoring executions, at the last 24 hours' pace"
+          value: '{{ with $values.A }}{{ printf "%.0f" $values.A.Value }}% of the month''s allowance by the 1st{{ else }}the usage figure cannot be read{{ end }}'
+          action: "Slow or drop a check in grafana/synthetic/endpoints.yml, then `python scripts/grafana-apply.py`"
+          description: >-
+            At 100% every check stops until the 1st (UTC), and every endpoint and certificate
+            alert goes blind with them.
+
+      # Database Observability is metered in HOST-HOURS: 2,232 a month included, which is three
+      # instances for a 31-day month. Two booking Postgres instances use 48 a day, ~64% of it.
+      # A fourth instance would pass it, and nothing else would say so.
+      - uid: dbo11y-hours-pace
+        title: Database Observability on pace to run out this month
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 90000, to: 0}
+            datasourceUid: grafanacloud-usage
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: |
+                100 * (
+                  max(grafanacloud_org_db_o11y_billable_host_hours)
+                  + clamp_min(max(grafanacloud_org_db_o11y_billable_host_hours) - max(grafanacloud_org_db_o11y_billable_host_hours offset 1d), 0)
+                    * (days_in_month() - day_of_month() + 1 - hour() / 24)
+                ) / max(grafanacloud_org_db_o11y_included_host_hours)
+          - refId: C
+            relativeTimeRange: {from: 90000, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [100]}
+        # Alerting, for the reason given on sm-executions-pace.
+        noDataState: Alerting
+        execErrState: Error
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database Observability host-hours, at the last 24 hours' pace"
+          value: '{{ with $values.A }}{{ printf "%.0f" $values.A.Value }}% of the month''s allowance by the 1st{{ else }}the usage figure cannot be read{{ end }}'
+          action: "More than 3 Postgres instances report to Database Observability: take one out of db-observability"
+          description: >-
+            The free tier includes three instances' worth of host-hours a month, and this pace
+            ends the month past it.

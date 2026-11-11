@@ -240,7 +240,6 @@ loki.process "select" {
     rate                = 2
     burst               = 600
     by_label_name       = "container"
-    max_distinct_labels = 100
     drop                = true
   }
 }

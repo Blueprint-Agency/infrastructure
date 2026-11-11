@@ -51,6 +51,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 UNITS = {"s": 1, "m": 60, "h": 3600}
 ENV_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 NOTIFICATIONS = "grafana/alerting/notifications.yml"
+# What a route in notifications.yml may say. Everything listed is sent; anything else fails.
+ROUTE_TIMINGS = ("group_wait", "group_interval", "repeat_interval")
+# mute_time_intervals / active_time_intervals are deliberately NOT here: they name mute timings,
+# and this script provisions none -- a route naming one would pass the dry run and then have its
+# policy PUT refused, after the contact points had already been written. Add them together.
+ROUTE_LISTS = ("group_by",)
+ROUTE_KEYS = {"receiver", "matchers", "routes", "continue", *ROUTE_TIMINGS, *ROUTE_LISTS}
 # Every dashboard is saved into this folder -- the same one the alert rules name.
 DASHBOARD_FOLDER = "Monitoring"
 # Synthetic checks. The cadence is per name, decided in grafana/synthetic/endpoints.yml against
@@ -206,20 +213,39 @@ def notifications(doc, resolve=True):
         points.append({"name": cp["name"], "type": cp["type"], "settings": settings,
                        "disableResolveMessage": bool(cp.get("disable_resolve_message"))})
 
-    def route(r):
-        out = {"receiver": r["receiver"],
-               "object_matchers": [list(m) for m in r.get("matchers") or []]}
-        for k in ("group_wait", "group_interval", "repeat_interval"):
+    def settings_of(r, where, allowed):
+        """The keys of a route that are passed to Grafana as they stand. Anything else is an
+        error, never a skip (#54): this function used to copy three timings and drop the rest
+        without a word, so a `continue: true` or a route-level `group_by` in the file looked
+        applied and was not."""
+        unknown = sorted(set(r) - allowed)
+        if unknown:
+            raise ValueError(f"{NOTIFICATIONS}: {where}: unsupported key(s) {', '.join(unknown)} "
+                             f"-- supported: {', '.join(sorted(allowed))}")
+        out = {k: r[k] for k in ROUTE_TIMINGS if r.get(k)}
+        for k in ROUTE_LISTS:
             if r.get(k):
-                out[k] = r[k]
+                out[k] = list(r[k])
+        return out
+
+    def route(r, where):
+        where = f"{where} > {r.get('receiver')} {r.get('matchers') or ''}".rstrip()
+        out = {"receiver": r["receiver"],
+               "object_matchers": [list(m) for m in r.get("matchers") or []],
+               **settings_of(r, where, ROUTE_KEYS)}
+        if r.get("continue"):
+            out["continue"] = True
         if r.get("routes"):
-            out["routes"] = [route(x) for x in r["routes"]]
+            out["routes"] = [route(x, where) for x in r["routes"]]
         return out
 
     pol = doc.get("policy") or {}
-    tree = {"receiver": pol["receiver"], "group_by": pol.get("group_by") or []}
+    # The root matches everything, so it takes no matchers and cannot `continue`.
+    tree = {"receiver": pol["receiver"],
+            **settings_of(pol, "policy", ROUTE_KEYS - {"matchers", "continue"})}
+    tree.setdefault("group_by", [])
     if pol.get("routes"):
-        tree["routes"] = [route(r) for r in pol["routes"]]
+        tree["routes"] = [route(r, "policy") for r in pol["routes"]]
     return points, tree
 
 
@@ -276,7 +302,10 @@ def main():
                   f"every {e.get('frequency') or SM_FREQUENCY} "
                   f"from {', '.join(e.get('probes') or probe_names)}")
         # resolve=False: never print a webhook URL, which is a credential.
-        points, tree = notifications(notif, resolve=False)
+        try:
+            points, tree = notifications(notif, resolve=False)
+        except ValueError as exc:
+            sys.exit(str(exc))
         for p in points:
             print(f"contact point {p['name']}: {p['type']}")
         print(f"notification policy: default -> {tree['receiver']}, "
@@ -287,6 +316,11 @@ def main():
                if not os.environ.get(v)]
     if missing:
         sys.exit(f"{', '.join(missing)} not set -- `set -a; . ./.env; set +a` first")
+    # Translated before anything is written, so a bad route changes nothing.
+    try:
+        points, tree = notifications(notif)
+    except ValueError as exc:
+        sys.exit(str(exc))
     api = Grafana(os.environ["GRAFANA_URL"], os.environ["GRAFANA_SA_TOKEN"])
     sm = Grafana(os.environ["GRAFANA_SM_URL"].rstrip("/") + "/api/v1", os.environ["GRAFANA_SM_TOKEN"])
     # Resolve probes before touching anything, so a bad name changes nothing -- the file-wide
@@ -315,7 +349,6 @@ def main():
     # Contact points and the policy before the checks: a check that starts failing should
     # already have somewhere to report it. X-Disable-Provenance keeps them editable in the
     # UI for an emergency silence -- unlike the rule groups, which are deliberately locked.
-    points, tree = notifications(notif)
     existing = {c["name"]: c for c in api.call("GET", "/api/v1/provisioning/contact-points") or []}
     for p in points:
         if p["name"] in existing:
