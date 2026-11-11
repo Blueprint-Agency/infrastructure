@@ -65,7 +65,7 @@ declare "booking_postgres" {
   database_observability.postgres "db" {
     data_source_name = string.format("postgres://db-o11y:%s@%s:5432/postgres?sslmode=disable", argument.password.value, argument.db_host.value)
     targets          = prometheus.exporter.postgres.db.targets
-    forward_to       = [loki.relabel.db.receiver]
+    forward_to       = [loki.process.trim.receiver]
 
     // explain_plans OFF: EXPLAIN needs SELECT on the tables it plans. Grafana's alternative,
     // pg_read_all_data, does NOT set BYPASSRLS, and booking-system's migration 0033 FORCEs
@@ -81,18 +81,47 @@ declare "booking_postgres" {
     // re-read that collector before the Dockerfile's tag moves. Do not "fix" an empty
     // schema tab with pg_read_all_data.
     //
-    // query_samples OFF since 2026-10-09: it is Loki lines, not series, and the series budget
-    // above never counted them. Measured: 6.17 GB/day of `op="query_association"` for the two
-    // instances -- 188 GB/month against the free tier's 50 -- against < 0.1 GB/day for every
-    // other container on both hosts combined. It used the whole month's allowance by Oct 9,
-    // Loki answered every push with `429 ... limit: 0 bytes/sec` until the month reset, and
-    // Synthetic Monitoring's probe, which writes its check logs to the same tenant, choked on
-    // the same 429 and stopped reporting on schedule (43 DatasourceNoData flaps in a day).
-    // What is lost is the "query samples" view; query_details and schema_details stay.
-    // If it ever comes back, it comes back with a measured daily volume written in
-    // docs/monitoring.md "Budget", and with `collect_interval` raised, not at the default.
+    // query_samples OFF since 2026-10-09, when the logs allowance ran out. It was blamed for
+    // the `op="query_association"` stream and is NOT its source -- query_details is (see
+    // below), so turning this off changed nothing and the allowance was at 80% again by
+    // Nov 11. It stays off anyway: it is Loki lines at a 10 s default interval and has never
+    // been measured here. If it comes back, it comes back with a measured daily volume in
+    // docs/monitoring.md "Budget" and a raised `collect_interval`.
     // (It REDACTS literals by default -- disable_query_redaction = false -- keep it so.)
     disable_collectors = ["explain_plans", "query_samples"]
+
+    // query_details is where the logs allowance went (#54). Every interval it sends the full
+    // text of the top 100 statements by total time as `op="query_association"`, with no
+    // dedup and no truncation (Alloy v1.19.2, collector/query_details.go). Measured
+    // 2026-11-11: 4.13 GB/day for the two instances against a 50 GB month, 97% of it ten
+    // bulk INSERTs of ~150 KB each, re-sent every minute. `statements_limit` cannot help --
+    // the offenders ARE the top statements. So: the same text every 5 minutes instead of
+    // every minute here, and loki.process "trim" below cuts each one to 1000 characters.
+    query_details {
+      collect_interval = "5m"
+    }
+  }
+
+  // The byte budget for this stack's log lines. Order matters.
+  loki.process "trim" {
+    forward_to = [loki.relabel.db.receiver]
+
+    // Cut querytext to 1000 characters and mark the cut with "..." (the collector's own
+    // convention for truncated text). The pattern eats escape pairs whole, so the cut never
+    // lands inside one. 1000 is RE2's repeat ceiling -- it cannot be raised. Proven on 200
+    // real lines with this image: 3.2 MB in, 0.16 MB out, none lost.
+    stage.replace {
+      expression = `querytext="(?:[^"\\]|\\.){1000}((?:[^"\\]|\\.)+)" datname=`
+      replace    = "..."
+    }
+
+    // The backstop. The pattern above depends on `querytext="..." datname=` in that order;
+    // if an Alloy upgrade moves a field it stops matching and says nothing. A line still
+    // this long after the trim is dropped rather than shipped.
+    stage.drop {
+      longer_than         = "8KB"
+      drop_counter_reason = "oversize"
+    }
   }
 
   loki.relabel "db" {
